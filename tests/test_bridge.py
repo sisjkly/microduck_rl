@@ -439,3 +439,18 @@ def test_mat2quat_matches_mujoco():
         mujoco.mju_quat2Mat(M, q)
         got = _mat2quat(M.reshape(3, 3))
         assert np.allclose(got, q if q[0] >= 0 else -q, atol=1e-9)
+
+
+def test_hip_trim_moves_true_hip_angles_the_way_sim_says():
+    import copy
+    from duck_runtime.tools import LEFT_HIP_PITCH, RIGHT_HIP_PITCH, hip_trim
+    cal = _calibrated()
+    old = copy.deepcopy(cal)
+    d = math.radians(5.0)  # want the trunk 5 deg further nose-down at HOME
+    hip_trim(cal, d)
+    for k, expect in ((LEFT_HIP_PITCH, -d), (RIGHT_HIP_PITCH, +d)):
+        q = C.DEFAULT_POSITION[k]
+        moved = old.joints[k].to_rad(cal.joints[k].to_raw(q)) - q  # true angle change, same command
+        assert moved == pytest.approx(expect, abs=2 * math.pi / 4096)
+    assert all(a.zero_raw == b.zero_raw for i, (a, b) in enumerate(zip(cal.joints, old.joints))
+               if i not in (LEFT_HIP_PITCH, RIGHT_HIP_PITCH))

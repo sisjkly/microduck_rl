@@ -13,6 +13,7 @@ This robot (default ``--backend bridge``): servos behind the ESP32-S3 MDK2 bridg
   python -m duck_runtime.tools imu-mount --calib calib.json        # two-pose IMU mount
   python -m duck_runtime.tools live      --calib calib.json        # angles + IMU, live
   python -m duck_runtime.tools home-test --calib calib.json        # TORQUE: ease to HOME
+  python -m duck_runtime.tools trim      --calib calib.json        # TORQUE, standing: hip-pitch trim
 
 Order on a new robot: template -> scan -> zero -> direction -> imu-mount -> live (check) ->
 home-test (robot hanging) -> run.
@@ -469,6 +470,76 @@ def cmd_home_test(args):
         io.close()
 
 
+# Trunk pitch of the simulated robot holding HOME on flat ground (SimIO: 813 g + BAM HD1910,
+# P=5): what the policy saw in training when it stood at HOME. Measured 2026-10-21.
+HOME_STAND_PITCH_DEG = 2.5
+LEFT_HIP_PITCH, RIGHT_HIP_PITCH = 2, 12
+
+
+def hip_trim(cal: Calibration, delta_pitch_rad: float) -> None:
+    """Shift both hip-pitch zeros so the same HOME command tilts the trunk delta further
+    nose-down (feet flat). Sign from SimIO: true left hip +e / right hip -e pitches the
+    trunk nose-UP, so nose-down by delta needs true left -delta, right +delta; a joint whose
+    true angle must move by e for the same command gets zero_raw += e * counts * direction."""
+    c = 4096.0 / (2 * math.pi)
+    for k, e in ((LEFT_HIP_PITCH, -delta_pitch_rad), (RIGHT_HIP_PITCH, +delta_pitch_rad)):
+        j = cal.joints[k]
+        j.zero_raw = int(round(j.zero_raw + e * c * j.direction))
+
+
+def cmd_trim(args):
+    """TORQUE ON, robot STANDING on flat ground at HOME (hand near it, not pushing).
+    Measures trunk pitch over 3 s and offers to trim the hip-pitch zeros so that HOME stands
+    at the pitch the policy was trained with (HOME_STAND_PITCH_DEG)."""
+    import select
+    from .safety import Safety
+    cal = Calibration.load(args.calib)
+    cal.validate()
+    io = open_io(args, cal)
+    safety = Safety(cal.limits())
+    home = DEFAULT_POSITION.copy()
+    home[MOUTH_INDEX] = MOUTH_CLOSED
+    io.set_torque(False)
+    start = io.read().positions.copy()
+    input("鸭子放在平地上（先扶着），按回车上力矩并回到 HOME；站稳后手留在旁边但不要碰它…")
+    io.set_torque(True)
+    try:
+        grav, n_ramp, n_settle, n_meas = [], 100, 100, 150
+        for k in range(n_ramp + n_settle + n_meas):
+            a = min(1.0, k / n_ramp)
+            s = io.read()
+            io.write(safety.clamp((1 - a) * start + a * home))
+            if k >= n_ramp + n_settle and s.imu_ready and np.linalg.norm(s.imu.gyro) < 0.3:
+                grav.append(s.imu.gravity)
+            io.wait_tick()
+        if len(grav) < 50:
+            print("机器人在晃或 IMU 未就绪，没测到稳定数据；扶稳后重试")
+            return
+        g = np.mean(grav, axis=0)
+        pitch, roll = math.degrees(math.asin(g[0])), math.degrees(math.asin(g[1]))
+        delta = HOME_STAND_PITCH_DEG - pitch
+        print(f"HOME 站立：俯仰 {pitch:+.1f} deg（+ 低头），横滚 {roll:+.1f} deg；训练时 HOME 站立俯仰 {HOME_STAND_PITCH_DEG:+.1f} deg")
+        if abs(delta) < 0.7:
+            print("差值 < 0.7 deg，不用修正。按回车卸力。")
+            apply = False
+        else:
+            print(f"建议把左右髋俯仰零位修正 {delta:+.1f} deg（躯干往{'前' if delta > 0 else '后'}）。输入 y 回车应用，直接回车放弃：", flush=True)
+        while not select.select([sys.stdin], [], [], 0)[0]:
+            io.read()
+            io.write(safety.clamp(home))
+            io.wait_tick()
+        apply = abs(delta) >= 0.7 and sys.stdin.readline().strip().lower() == "y"
+    finally:
+        io.set_torque(False)
+        io.close()
+    if apply:
+        before = (cal.joints[LEFT_HIP_PITCH].zero_raw, cal.joints[RIGHT_HIP_PITCH].zero_raw)
+        hip_trim(cal, math.radians(delta))
+        cal.save(args.calib)
+        print(f"hip pitch zero_raw L {before[0]} -> {cal.joints[LEFT_HIP_PITCH].zero_raw}, "
+              f"R {before[1]} -> {cal.joints[RIGHT_HIP_PITCH].zero_raw}; saved {args.calib}. 再跑一次 trim 确认。")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m duck_runtime.tools", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -479,7 +550,8 @@ def main(argv=None):
     p.set_defaults(fn=cmd_template)
     for name, fn in [("scan", cmd_scan), ("relax", cmd_relax), ("step-test", cmd_step_test),
                      ("live", cmd_live), ("zero", cmd_zero),
-                     ("direction", cmd_direction), ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test)]:
+                     ("direction", cmd_direction), ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test),
+                     ("trim", cmd_trim)]:
         p = sub.add_parser(name)
         add_robot_args(p)
         if name not in ("scan", "relax", "step-test"):
