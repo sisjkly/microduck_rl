@@ -2,6 +2,8 @@
 
     rad = (raw - zero_raw) * 2pi/4096 * direction
 
+``id`` 0 marks a joint with no servo on this robot (the bridge build's mouth).
+
 ``zero_raw`` is the encoder count at the joint's MJCF zero, ``direction`` makes positive
 radians turn the way the MJCF joint axis does. Both depend on how each horn was fitted,
 so they are measured on *this* robot (``python -m duck_runtime.tools zero`` and the
@@ -18,13 +20,19 @@ from pathlib import Path
 
 import numpy as np
 
-from .contract import JOINT_IDS, JOINT_LIMITS, JOINT_NAMES, NUM_JOINTS
+from .contract import JOINT_IDS, JOINT_LIMITS, JOINT_NAMES
 from .imu import DEFAULT_MOUNT
 
 COUNTS_PER_RAD = 4096.0 / (2.0 * math.pi)
 
 # kissqy hardware.json (official skeleton + HD1910, 2026-10-03), JOINT_NAMES order.
 TEMPLATE_DIRECTIONS = (1, -1, -1, -1, -1, 1, 1, -1, 1, -1, 1, -1, -1, -1, -1)
+
+# This robot (ESP32-S3 MDK2 bridge, virtual IDs 1-14), wiring from ~/microduck/src/constants.py
+# MOTOR_TO_ID, JOINT_NAMES order. 0 = no servo (the mouth). The bridge's old mapping was
+# direction -1 / center 2048 on every joint — unmeasured, so only a starting guess.
+BRIDGE_IDS = (10, 9, 8, 7, 6, 12, 11, 13, 14, 0, 5, 4, 3, 2, 1)
+BRIDGE_DIRECTIONS = (-1,) * 15
 
 
 @dataclass
@@ -65,6 +73,13 @@ class Calibration:
         ], notes="TEMPLATE: zero_raw/direction unmeasured, imu_mount unverified")
 
     @classmethod
+    def template_bridge(cls) -> "Calibration":
+        return cls(joints=[
+            JointCal(name=n, id=i, direction=d, min_rad=float(lo), max_rad=float(hi), calibrated=(i == 0))
+            for n, i, d, (lo, hi) in zip(JOINT_NAMES, BRIDGE_IDS, BRIDGE_DIRECTIONS, JOINT_LIMITS)
+        ], notes="TEMPLATE (MDK2 bridge): zero_raw/direction unmeasured, imu_mount unverified; id 0 = no servo")
+
+    @classmethod
     def load(cls, path: str | Path) -> "Calibration":
         d = json.loads(Path(path).read_text())
         return cls(joints=[JointCal(**j) for j in d["joints"]], imu_mount=d["imu_mount"],
@@ -79,14 +94,15 @@ class Calibration:
     def validate(self, require_calibrated: bool = False) -> None:
         if [j.name for j in self.joints] != list(JOINT_NAMES):
             raise ValueError("calibration joints must be the 15 JOINT_NAMES in order")
-        if len({j.id for j in self.joints}) != NUM_JOINTS:
+        ids = [j.id for j in self.joints if j.id]
+        if len(set(ids)) != len(ids):
             raise ValueError("duplicate servo IDs in calibration")
         for j, (lo, hi) in zip(self.joints, JOINT_LIMITS):
             if j.direction not in (-1, 1) or not 0 <= j.zero_raw <= 4095:
                 raise ValueError(f"{j.name}: bad direction/zero_raw")
             if not (lo - 1e-6 <= j.min_rad < j.max_rad <= hi + 1e-6):
                 raise ValueError(f"{j.name}: limits must lie inside the MJCF range [{lo}, {hi}]")
-            if require_calibrated and not j.calibrated:
+            if require_calibrated and j.id and not j.calibrated:
                 raise ValueError(f"{j.name}: not calibrated")
         n = math.sqrt(sum(v * v for v in self.imu_mount))
         if abs(n - 1.0) > 1e-6:

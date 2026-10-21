@@ -1,7 +1,7 @@
 # duck_runtime — 官方策略 + HD1910 的精简运行端
 
-用 **官方 ONNX 策略**（`pollen-robotics/microduck-policies`，如 `velstand.onnx`）驱动一台
-**飞特 HD1910 + Raspberry Pi Zero 2W** 的 Microduck。官方 robotd 只支持 Dynamixel/XL330
+用 **官方 ONNX 策略**（`pollen-robotics/microduck-policies`，如 `velstand.onnx`）驱动
+**HD1910 + Raspberry Pi Zero 2W** 的 Microduck。官方 robotd 只支持 Dynamixel/XL330
 和 Radxa ZERO 3W，这里只移植策略真正依赖的部分，约定逐行对照官方源码
 （`pollen-robotics/microduck@942e58e`）：
 
@@ -12,75 +12,59 @@
 | `目标 = HOME + 0.9·a`，头/腿低通 0.5/0.7，last_action 为原始输出 | `robotd/src/control.rs:654-735` | `controller.py` |
 | IMU：SFLP 四元数 × 安装姿态⁻¹ → 重力投影，三点中值 | `duck-control/src/imu.rs` | `imu.py` |
 | 安全：NaN 拒绝、限位、跌倒判定 gz>-0.5 持续 200 ms、指令看门狗 0.5 s | `duck-control/src/safety.rs` | `safety.py` |
-| HD1910 寄存器（P=5、D=0、力矩上限 1000、目标 42、反馈 56） | kissqy `duck-control/src/{feetech,hd1910}.rs`（实机验证） | `feetech.py` |
 
-仿真后端（`sim_io.py`，MuJoCo + BAM HD1910 + 813 g 质量配置）和真机后端走**同一套**
-控制器/安全/状态机代码，IMU 甚至在字节级仿真（编码 → `SflpDecoder` 解码）。
+控制器 / 安全 / 状态机对仿真和真机是**同一套代码**，只有最底层的 I/O 不同。
 
-## 硬件：本机四块板
+## 本机（最小可行路线）
 
 ```
-                USB (micro-USB OTG)            TTL 半双工 1 Mbps
- Pi Zero 2W ───────────────────► FE-URT-2 ─────────────────► 15× HD1910（ID 见下）
-   GPIO14 TXD ─► ESP32 RX(16)
-   GPIO15 RXD ◄─ ESP32 TX(17)       I²C 400 kHz
-   GND ──────── ESP32 GND   ESP32 ──────────────► LSM6DSV16X（固定在躯干上）
+Pi Zero 2W ──USB /dev/ttyACM0──► ESP32-S3（MDK2 桥接固件）──UART 单线 1 Mbps──► 14× HD1910（ID 1–14）
+    └── I²C1 ──► LSM6DSV16X（0x6A/0x6B）
 ```
 
-1. **舵机**：HD1910 ID 与官方一致：左腿 20–24，头颈 30–33，嘴 34，右腿 10–14；波特率 **1 Mbps**
-   （飞特 FD 上位机设置）。FE-URT-2 自带方向切换；回显自动检测（`--echo auto`），
-   串口打开时自动设低延迟模式。
-2. **IMU = LSM6DSV16X，与官方 imu_to_dxl 板同一颗芯片**，由 ESP32 读取：
-   `esp32_imu/` 固件用 ST 官方驱动、按官方/FT6 完全相同的配置（±4 g、±500 dps、120 Hz、
-   SFLP game rotation 120 Hz）打出**与官方逐字节相同的 12 字节块**，经 UART 921600 发给 Pi，
-   Pi 端 `esp32_link.py` 用同一个 `SflpDecoder` 解码。
-   - **IMU 必须刚性固定在躯干上**（官方 IMU 板在躯干里）：策略观测的是躯干姿态，装在头上会跟着脖子转。
-   - 朝向不用对齐，`tools imu-mount` 用两个姿态测出安装四元数。
-   - 链路超时（帧 >50 ms 或四元数 >100 ms 没更新）或 ESP32 报传感器错误 → 拒绝启动；运行中则立即卸力。
-3. **Pi 的 GPIO 串口**（给 ESP32 用，URT-2 占了唯一的 USB 口）：
-   `sudo raspi-config` → Interface → Serial：login shell **否**、hardware **是**；
-   `/boot/firmware/config.txt` 加 `dtoverlay=disable-bt`（把稳定的 PL011 串口给 GPIO14/15），重启后用 `/dev/serial0`。
-   也可以给 Pi 接 USB Hub，把 ESP32 走 USB（固件 `-DLINK_USB=1`，端口变成 `/dev/ttyUSB*` 或 `/dev/ttyACM*`）。
+- **`bridge.py`**：对接 ESP32-S3 上现有的 MDK2 固件（`MicroDuck_XGO_r1/firmware`，带 NPD1）。
+  每拍一次 SYNC READ 320（14 个关节的原始编码器、速度、电流、电压、温度、新鲜度），
+  一次 SYNC WRITE 116 写目标。**标定全在 Python 里**：固件的 `center/dir` 映射被读回并反算，
+  `bridge_config.h` 不用改。上力矩前用 NPD1 把 RAM P/D 设为训练值 **5/0** 并回读确认，退出时恢复原值。
+  固件自带保护照常生效：主机 1 s 无通信、反馈 >100 ms、舵机错误、模式≠4 → 断力矩并锁存故障；
+  全体断力矩（按 `0` 或 `tools relax`）清除故障。
+- **`pi_imu.py`**：Pi 直接读 LSM6DSV16X，配置与官方 IMU 板相同（±4 g、±500 dps、120 Hz、
+  SFLP game rotation 120 Hz 进 FIFO），拼成官方同款 12 字节块交给 `SflpDecoder`。
+  四元数 >100 ms 不更新 → 拒绝启动 / 运行中卸力。
+- **零依赖安装**：只用标准库 + numpy + onnxruntime，直接用鸭子上现成的 `~/microduck/.venv`。
+- 关节 ID 来自鸭子上 `~/microduck/src/constants.py` 的接线；嘴没有舵机（标定文件里 `id: 0`）。
+- **IMU 必须刚性固定在躯干上**；朝向不用对齐，`tools imu-mount` 测出来。
 
-### 烧录 ESP32
-```bash
-cd duck_runtime/esp32_imu
-pio run -e esp32dev -t upload      # 按板子改 platformio.ini 的 board 和引脚
-```
-上电后用 `tools scan --imu-port /dev/serial0` 检查：应约 200 帧/秒、校验错误为 0、`ready=True`。
-
-## Pi Zero 2W 环境
+### 1. 装到鸭子上
 
 ```bash
-# Raspberry Pi OS Lite 64-bit (Bookworm)
-sudo apt install -y python3-venv git
-git clone https://github.com/sisjkly/microduck_rl.git && cd microduck_rl && git checkout ours-813g-hd1910
-python3 -m venv ~/duck && . ~/duck/bin/activate
-pip install -r duck_runtime/requirements.txt
-# USB 转接（FTDI）：把延迟降到 1 ms
-echo 'ACTION=="add", SUBSYSTEM=="usb-serial", DRIVER=="ftdi_sio", ATTR{latency_timer}="1"' | \
-  sudo tee /etc/udev/rules.d/99-ftdi-latency.rules && sudo udevadm control --reload
-sudo usermod -aG dialout $USER   # 串口权限，重新登录生效
+cd ~ && git clone -b ours-813g-hd1910 https://github.com/sisjkly/microduck_rl.git
+cd ~/microduck_rl
+curl -L -o velstand.onnx https://huggingface.co/pollen-robotics/microduck-policies/resolve/main/velstand.onnx
+alias duck='~/microduck/.venv/bin/python -m'
+sudo systemctl stop microduck-gamepad.service     # 它会占用 /dev/ttyACM0；想开机不自启再 disable
 ```
-策略文件：从 HF `pollen-robotics/microduck-policies` 下载 `velstand.onnx`（walk 槽，零指令即站立）。
 
-## 上机流程（按顺序，一次只验证一件事）
+### 2. 上机流程（按顺序，一次只验证一件事）
 
 ```bash
-A="--port /dev/ttyUSB0 --imu-port /dev/serial0"
-python -m duck_runtime.tools template calib.json          # 生成标定模板
-python -m duck_runtime.tools scan $A                      # 15 个舵机应答 + IMU 链路 ~200 帧/秒
-python -m duck_runtime.tools zero $A --calib calib.json       # 零位：腿伸直、头摆正
-python -m duck_runtime.tools direction $A --calib calib.json  # 逐关节核对正方向
-python -m duck_runtime.tools imu-mount $A --calib calib.json  # 直立 + 前倾两个姿态
-python -m duck_runtime.tools live $A --calib calib.json       # 检查：角度、重力投影
-python -m duck_runtime.tools home-test $A --calib calib.json  # 吊起，上力矩回 HOME
-python -m duck_runtime.run --backend feetech $A --calib calib.json \
-       --policy velstand.onnx --action-scale 0.7 --log first.npz   # 1 上力矩 → 2 启动策略
+duck duck_runtime.tools scan                          # 14 个舵机 ok、mode 4、NPD1 yes；IMU SFLP ≈120 Hz
+duck duck_runtime.tools template calib.json           # 本机 ID 的标定模板
+duck duck_runtime.tools zero      --calib calib.json  # 零位：腿伸直并拢、脚放平、脖子和头摆正
+duck duck_runtime.tools direction --calib calib.json  # 逐关节按提示往正方向掰，自动修正符号
+duck duck_runtime.tools imu-mount --calib calib.json  # 直立 + 前倾两个姿态
+duck duck_runtime.tools live      --calib calib.json  # 检查：零位附近读数≈0，直立 gravity≈[0,0,-1]
+duck duck_runtime.tools home-test --calib calib.json  # 吊起，上力矩 3 s 回 HOME，看每个关节误差
+duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0.7 --log first.npz
+#   键：1 上力矩回 HOME → 2 启动策略 → w/s a/d 给指令；3 停止回 HOME；0 卸力；Ctrl+C 退出
 ```
 
-- `run` 会拒绝未完成标定（`calibrated` / `imu_mount_verified`）的配置。
-- 第一次运行建议吊着、加 `--action-scale 0.7`；落地后再恢复默认 0.9。
+- `scan` 里如果某个舵机 `acc/time/speed` 非 0（`<-- move limit set`）先告诉我：桥只写目标位置，
+  这几个寄存器里的旧值会限制每次运动，和训练假设不一致。
+- 断力矩时关节若掰不动（减速比大），零位可用鸭子上已有的
+  `~/microduck_fix_20260927/tools/calibrate_joint.py` 通电点动到位，记下 `raw_hd1910` 填进 `calib.json` 的 `zero_raw`。
+- `run` 会拒绝未完成标定（每个关节 `calibrated`、`imu_mount_verified`）的配置。
+- 第一次运行吊着、`--action-scale 0.7`；落地后再恢复默认 0.9。
 - 摇杆量给到 **0.2–0.3** 才会迈步（策略本身的特性，仿真和 mjlab 一致）。
 - 跌倒（倾斜 >60° 持续 200 ms）默认立即卸力；`--keep-on-fall` 改成继续驱动（官方默认行为）。
 
@@ -90,17 +74,22 @@ python -m duck_runtime.run --backend feetech $A --calib calib.json \
 python -m duck_runtime.run --backend sim --policy velstand.onnx --viewer
 ```
 
-## 已验证（仿真）
+## 其它接法（`--backend feetech`）
 
-官方 velstand v7，813 g + HD1910（mjlab 训练环境，8 env × 6 指令，`scripts/mjlab_policy_eval.py`）：
+Pi 直连飞特总线（FE-URT / 官方 IMU 板 ID 200 / ESP32 IMU 串口链路 `--imu-port`）：`feetech.py`、
+`esp32_link.py`、`esp32_imu/` 固件。本机不用。
+
+## 已验证
+
+仿真（官方 velstand v7，813 g + HD1910，mjlab 训练环境，8 env × 6 指令，`scripts/mjlab_policy_eval.py`）：
 
 | 参数 | 前进 0.3 | 后退 −0.3 | 侧移 0.2 | 转向 1.0 | 跌倒 |
 |---|---|---|---|---|---|
 | 官方默认 0.9 + 低通 | 0.15 | −0.14 | 0.03 | 0.57 | 1/48 |
 | 训练时 1.0 无滤波 | 0.15 | −0.18 | 0.05 | 0.60 | 1/48 |
 
-`tests/test_duck_runtime.py`（23 项）：观测布局、HOME、关节顺序与训练端一致；IMU 安装姿态往返；
-控制器缩放/滤波语义；状态机（不请求不动、看门狗、跌倒卸力、倒地拒绝启动）；
-ESP32 帧解析/校验/超时判定，以及经真实伪终端 200 Hz 推流；`FeetechIO` 对接一条**模拟的
-HD1910 总线**（伪终端另一端按飞特协议应答，含回显/无回显两种）完成读、上力矩（P=5/D=0/
-限 1000 回读校验）、写目标、卸力。ESP32 固件做了语法级编译（真机工具链在沙箱里装不上）。
+`tests/test_bridge.py`：桥接后端对接一个**按 bridge_runtime.cpp 逻辑模拟的 MDK2 固件**（真实伪终端，
+含非默认 center/dir 映射）——读数换算、上力矩时 P/D=5/0 回读且姿态不跳、目标逐计数正确、
+故障拒绝上力矩与卸力清除、退出恢复原 P/D、端口独占、状态机回 HOME；IMU 驱动对接寄存器级假芯片——
+配置与 ST 驱动一致（保留保留位）、重力/陀螺换算、就绪/超时/积压重置/I²C 错误、安装姿态。
+**未在真机上跑过**：第一次请从 `scan` 开始，逐步把输出贴回来。

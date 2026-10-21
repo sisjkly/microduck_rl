@@ -213,6 +213,11 @@ class FeetechIO(RobotIO):
     def now(self) -> float:
         return time.monotonic() - self._t0
 
+    def raw_positions(self) -> dict[int, int]:
+        """Raw encoder counts by servo ID (calibration tools)."""
+        raw = self.bus.sync_read(REG_FEEDBACK, FEEDBACK_LEN, self.ids)
+        return {i: _signmag(struct.unpack_from("<H", raw[i], 0)[0]) for i in self.ids}
+
     def write(self, targets: np.ndarray) -> None:
         rows = {}
         for k, j in enumerate(self.cal.joints):

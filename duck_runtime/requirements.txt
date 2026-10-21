@@ -1,4 +1,5 @@
 numpy>=1.24
 onnxruntime>=1.17
+# --backend feetech only (the bridge backend uses termios/ioctl from the stdlib):
 pyserial>=3.5
 # simulation backend only (laptop): mujoco, better-actuator-models (see pyproject)

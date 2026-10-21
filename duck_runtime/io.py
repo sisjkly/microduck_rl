@@ -1,6 +1,7 @@
 """What the controller reads and writes, independent of the body behind it.
 
-Two implementations: ``sim_io.SimIO`` (MuJoCo + BAM HD1910, CPU) and
+Implementations: ``bridge.BridgeIO`` (ESP32-S3 MDK2 bridge + Pi I2C IMU, this robot),
+``sim_io.SimIO`` (MuJoCo + BAM HD1910, CPU) and
 ``feetech.FeetechIO`` (HD1910 servos + IMU on a Feetech TTL bus). The controller,
 safety layer and policy code are shared, so a run in simulation exercises the exact
 code path the robot runs.

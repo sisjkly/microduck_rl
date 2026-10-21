@@ -2,9 +2,9 @@
 
   # rehearse on a laptop (MuJoCo viewer if a display is available)
   python -m duck_runtime.run --backend sim --policy velstand.onnx --viewer
-  # on the robot (Pi), after duck_runtime.tools calibration
-  python -m duck_runtime.run --backend feetech --port /dev/ttyUSB0 --imu-port /dev/serial0 \
-      --calib calib.json --policy velstand.onnx
+  # this robot (ESP32-S3 bridge on /dev/ttyACM0 + Pi I2C IMU), after duck_runtime.tools calibration
+  sudo systemctl stop microduck-gamepad.service
+  python -m duck_runtime.run --calib calib.json --policy velstand.onnx
 
 Keys:  1 enable (torque on, ease to HOME)   2 start policy   3 stop (back to HOME)
        0 limp (torque off)                  w/s vx +-0.05    z/c vy +-0.05
@@ -55,14 +55,15 @@ class Keys:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", choices=["sim", "feetech"], required=True)
+    ap.add_argument("--backend", choices=["bridge", "feetech", "sim"], default="bridge")
     ap.add_argument("--policy", required=True, help="61->14 ONNX (e.g. official velstand.onnx)")
     ap.add_argument("--tuning", choices=["official", "trained"], default="official",
                     help="official: scale 0.9 + low-pass 0.5/0.7 (robotd defaults); trained: 1.0, no filter")
     ap.add_argument("--action-scale", type=float, default=None, help="override, e.g. 0.7 for a timid first run")
-    ap.add_argument("--port", default="/dev/ttyUSB0")
-    ap.add_argument("--echo", choices=["auto", "yes", "no"], default="auto")
-    ap.add_argument("--imu-port", default=None, help="ESP32 IMU bridge port (e.g. /dev/serial0)")
+    ap.add_argument("--port", default=None, help="default /dev/ttyACM0 (bridge) or /dev/ttyUSB0 (feetech)")
+    ap.add_argument("--i2c-bus", type=int, default=1, help="bridge: Pi I2C bus of the LSM6DSV16X")
+    ap.add_argument("--echo", choices=["auto", "yes", "no"], default="auto", help="feetech only")
+    ap.add_argument("--imu-port", default=None, help="feetech only: ESP32 IMU link port")
     ap.add_argument("--calib")
     ap.add_argument("--viewer", action="store_true", help="sim only")
     ap.add_argument("--keep-on-fall", action="store_true", help="keep driving after a fall (official default)")
@@ -79,13 +80,12 @@ def main(argv=None):
         safety = Safety()
     else:
         from .calibration import Calibration
-        from .feetech import FeetechIO
+        from .tools import open_io
         if not args.calib:
             ap.error("--calib is required on the robot")
         cal = Calibration.load(args.calib)
         cal.validate(require_calibrated=True)
-        from .tools import _echo, make_imu_source
-        io = FeetechIO(args.port, cal, echo=_echo(args), imu_source=make_imu_source(args.imu_port, cal.imu_mount))
+        io = open_io(args, cal)
         safety = Safety(cal.limits())
 
     log: list[TickLog] | None = [] if args.log else None
@@ -108,7 +108,12 @@ def main(argv=None):
             while viewer is None or viewer.is_running():
                 t0 = time.monotonic()
                 for k in keys.poll():
-                    if k == "1": runner.enable()
+                    if k == "1":
+                        try:
+                            runner.enable()
+                        except RuntimeError as e:  # e.g. a latched bridge fault: say why, stay limp
+                            runner.limp()
+                            print(f"\n[refused] enable: {e}")
                     elif k == "2" and not runner.start(): print(f"\n[refused] start: {runner.refusal or runner.state.value}")
                     elif k == "3": runner.stop()
                     elif k == "0": runner.limp()
