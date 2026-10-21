@@ -39,36 +39,22 @@ PROFILE_ENV = "MICRODUCK_MASS_PROFILE"
 
 PROFILES: dict[str, dict | None] = {
     "official": None,
-    # Our clone (2026-10-21): Feetech HD1910 servos, each +3 g vs XL330
-    # (15 housings incl. the mouth -> +45 g); head heavier; measured 813 g total.
-    # The head's non-servo extra closes the budget: 813 - 737.2 - 45 = 30.8 g,
-    # i.e. head subtree +45.8 g incl. its 5 servos. Distribution inside the
-    # head is unknown -> CoM-preserving ("com"); see ours_813g_headfront.
+    # Our clone (confirmed 2026-10-21): Feetech HD1910, 23 g each vs XL330 18 g
+    # (kissqy's figure) -> +5 g x 15 housings (incl. the mouth) = +75 g, 812.2 g.
+    # Weighed: whole robot 813 g; head ~260 g, which matches the head_pitch-and-up
+    # subtree (neck_pitch body: 258.1 g with the servo extras) — so the head carries
+    # no other extra mass. The 0.8 g remainder goes to the head-roll body.
     "ours_813g": {
-        "servo_extra_g": 3.0,
-        "body_extra": {"jaw_soft": {"g": 30.8, "mode": "com"}},
+        "servo_extra_g": 5.0,
+        "body_extra": {"jaw_soft": {"g": 0.8, "mode": "com"}},
         "target_total_g": 813.0,
     },
-    # Bound: the same 30.8 g concentrated at the electronics (Pi + HAT centroid,
-    # jaw_soft frame) — the most forward plausible placement.
-    "ours_813g_headfront": {
-        "servo_extra_g": 3.0,
-        "body_extra": {"jaw_soft": {"g": 30.8, "mode": "point", "pos": (0.0169, -0.0006, -0.0558)}},
-        "target_total_g": 813.0,
-    },
-    # kissqy/Microduck-kissqy "hd1910_820g_v1" (HD1910 23 g vs XL330 18 g, +5 g x 15;
-    # head +3 g; trunk takes the rest to 820 g). Only for reproducing their models.
+    # kissqy/Microduck-kissqy "hd1910_820g_v1" (+5 g x 15; head +3 g; trunk takes
+    # the rest to 820 g). Their deployed models were trained on this.
     "kissqy_820g": {
         "servo_extra_g": 5.0,
         "body_extra": {"jaw_soft": {"g": 3.0, "mode": "com"}, "trunk_base": {"g": 4.75682, "mode": "com"}},
         "target_total_g": 820.0,
-    },
-    # Reading "head +50 g on top of the servo increase": 832 g, contradicts the
-    # 813 g weighing — kept only as a pessimistic bound.
-    "ours_832g_head50": {
-        "servo_extra_g": 3.0,
-        "body_extra": {"jaw_soft": {"g": 50.0, "mode": "com"}},
-        "target_total_g": 832.0,
     },
 }
 

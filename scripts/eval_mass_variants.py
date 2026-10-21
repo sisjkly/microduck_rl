@@ -226,7 +226,7 @@ def _wrap(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("onnx")
-    ap.add_argument("--profiles", nargs="+", default=["official", "ours_813g", "ours_813g_headfront"])
+    ap.add_argument("--profiles", nargs="+", default=["official", "ours_813g", "kissqy_820g"])
     ap.add_argument("--servos", nargs="+", default=["xl330", "hd1910"])
     ap.add_argument("--scenarios", nargs="+", default=list(SCENARIOS))
     ap.add_argument("--seeds", type=int, default=6)

@@ -37,7 +37,7 @@ def test_every_variant_has_15_servo_housings(xml):
 @pytest.mark.parametrize("xml", VARIANTS)
 def test_ours_813g_total_and_physical_inertia(xml):
     m0, m = _model(xml, None), _model(xml, "ours_813g")
-    assert m.body_mass.sum() - m0.body_mass.sum() == pytest.approx(0.045 + 0.0308, abs=1e-6)
+    assert m.body_mass.sum() - m0.body_mass.sum() == pytest.approx(0.075 + 0.0008, abs=1e-6)
     I = np.sort(m.body_inertia[1:], axis=1)
     assert np.all(I > 0) and np.all(I[:, 0] + I[:, 1] >= I[:, 2] * (1 - 1e-9))
 
@@ -53,7 +53,9 @@ def test_official_is_exact_noop():
 def test_head_extra_lands_on_head_only():
     m0, m = _model("robot_walk.xml", None), _model("robot_walk.xml", "ours_813g")
     head = m.body("neck").id
-    assert (m.body_subtreemass[head] - m0.body_subtreemass[head]) * 1000 == pytest.approx(5 * 3.0 + 30.8, abs=1e-6)
+    assert (m.body_subtreemass[head] - m0.body_subtreemass[head]) * 1000 == pytest.approx(5 * 5.0 + 0.8, abs=1e-6)
+    # Weighed head (~260 g) = everything from the head_pitch joint up.
+    assert m.body_subtreemass[m.body("neck_pitch").id] * 1000 == pytest.approx(260.0, abs=3.0)
     # "com" mode keeps the head-roll body's CoM where the servo extras put it.
     b = m.body("jaw_soft").id
     assert np.linalg.norm(m.body_ipos[b] - m0.body_ipos[b]) < 2e-3
