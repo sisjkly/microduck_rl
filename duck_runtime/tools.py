@@ -434,6 +434,8 @@ def cmd_home_test(args):
     cal.validate()
     io = open_io(args, cal)
     safety = Safety(cal.limits())
+    home = DEFAULT_POSITION.copy()
+    home[5:9] += [math.radians(float(v)) for v in args.head_cmd.split(",")]  # neck/head offsets
     io.set_torque(False)
     s = io.read()
     start = s.positions.copy()
@@ -443,13 +445,13 @@ def cmd_home_test(args):
         n = 150
         for k in range(n + 100):
             a = min(1.0, k / n)
-            t = (1 - a) * start + a * DEFAULT_POSITION
+            t = (1 - a) * start + a * home
             t[MOUTH_INDEX] = MOUTH_CLOSED
             io.read()  # keeps the bridge's host watchdog fed and checks feedback freshness
             io.write(safety.clamp(t))
             io.wait_tick()
         s = io.read()
-        for j, q, h in zip(cal.joints, s.positions, DEFAULT_POSITION):
+        for j, q, h in zip(cal.joints, s.positions, home):
             if not j.id:
                 continue
             flag = "  <-- check" if abs(q - h) > math.radians(5) else ""
@@ -487,6 +489,9 @@ def main(argv=None):
             p.add_argument("--counts", type=int, default=150, help="step size in encoder counts (150 = 13 deg)")
         if name in ("zero", "direction"):
             p.add_argument("--joints", default="", help="comma-separated subset")
+        if name == "home-test":
+            p.add_argument("--head-cmd", default="0,0,0,0",
+                           help="neck_pitch,head_pitch,head_yaw,head_roll offsets from HOME, degrees")
         p.set_defaults(fn=fn)
     args = ap.parse_args(argv)
     args.fn(args)

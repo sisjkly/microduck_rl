@@ -19,7 +19,7 @@ from enum import Enum
 
 import numpy as np
 
-from .contract import DEFAULT_POSITION, MOUTH_CLOSED, MOUTH_INDEX
+from .contract import DEFAULT_POSITION, HEAD_JOINTS, MOUTH_CLOSED, MOUTH_INDEX
 from .controller import Command, Controller
 from .io import RobotIO, Sensors
 from .safety import Safety
@@ -52,6 +52,10 @@ class Runner:
     ramp_s: float = 2.0
     on_fall: str = "limp"          # "limp" | "keep" (keep driving, like the official default)
     log: list[TickLog] | None = None
+    # Neck/head offsets from HOME (rad, [neck_pitch, head_pitch, head_yaw, head_roll]) used for
+    # RAMP/HOLD. Pair it with the same Command.head so the policy tracks the pose it starts in
+    # (a build whose neck cannot reach HOME's +20 deg back).
+    head_offset: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
     def __post_init__(self):
         self.state = State.LIMP
@@ -61,6 +65,8 @@ class Runner:
         self._ramp_t0 = 0.0
         self.fall_events = 0
         self.refusal = ""
+        self.stand_pose = DEFAULT_POSITION.copy()
+        self.stand_pose[list(HEAD_JOINTS)] += np.asarray(self.head_offset, dtype=float)
 
     # -- requests ------------------------------------------------------------------------
     def enable(self) -> None:
@@ -113,12 +119,12 @@ class Runner:
 
         if self.state is State.RAMP:
             a = min(1.0, (s.t - self._ramp_t0) / max(self.ramp_s, 1e-6))
-            targets = (1 - a) * self._ramp_from + a * DEFAULT_POSITION
+            targets = (1 - a) * self._ramp_from + a * self.stand_pose
             targets[MOUTH_INDEX] = MOUTH_CLOSED
             if a >= 1.0:
                 self.state = State.HOLD
         elif self.state is State.HOLD:
-            targets = DEFAULT_POSITION.copy()
+            targets = self.stand_pose.copy()
             targets[MOUTH_INDEX] = MOUTH_CLOSED
         elif self.state is State.RUN and not s.imu_ready:
             # Never run the policy on a stale/default orientation: go limp, say why.

@@ -15,6 +15,7 @@ Keys:  1 enable (torque on, ease to HOME)   2 start policy   3 stop (back to HOM
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import select
 import sys
@@ -68,6 +69,9 @@ def main(argv=None):
     ap.add_argument("--viewer", action="store_true", help="sim only")
     ap.add_argument("--keep-on-fall", action="store_true", help="keep driving after a fall (official default)")
     ap.add_argument("--log", help="write an .npz log of every tick on exit")
+    ap.add_argument("--head-cmd", default="0,0,0,0",
+                    help="head pose command, degrees from HOME: neck_pitch,head_pitch,head_yaw,head_roll "
+                         "(also used for the stand pose before the policy starts)")
     args = ap.parse_args(argv)
 
     tuning = Tuning.official() if args.tuning == "official" else Tuning.as_trained()
@@ -89,8 +93,11 @@ def main(argv=None):
         safety = Safety(cal.limits())
 
     log: list[TickLog] | None = [] if args.log else None
+    head = tuple(math.radians(float(v)) for v in args.head_cmd.split(","))
+    if len(head) != 4:
+        ap.error("--head-cmd needs 4 values")
     runner = Runner(io, Controller(Policy(args.policy), tuning), safety,
-                    on_fall="keep" if args.keep_on_fall else "limp", log=log)
+                    on_fall="keep" if args.keep_on_fall else "limp", log=log, head_offset=head)
     viewer = None
     if args.viewer and args.backend == "sim" and os.environ.get("DISPLAY"):
         import mujoco.viewer
@@ -124,7 +131,7 @@ def main(argv=None):
                     elif k == "a": wz = min(WZ_MAX, wz + 0.2)
                     elif k == "d": wz = max(-WZ_MAX, wz - 0.2)
                     elif k == " ": vx = vy = wz = 0.0
-                runner.set_command(Command(twist=(vx, vy, wz)), io.now())
+                runner.set_command(Command(twist=(vx, vy, wz), head=head), io.now())
                 runner.tick()
                 if viewer is not None:
                     viewer.sync()
