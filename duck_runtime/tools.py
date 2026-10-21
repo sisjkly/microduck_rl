@@ -442,7 +442,14 @@ def cmd_home_test(args):
                 continue
             flag = "  <-- check" if abs(q - h) > math.radians(5) else ""
             print(f"  {j.name:16s} err {math.degrees(q - h):+6.1f} deg{flag}")
-        input("对照实物确认是 STAND 姿态（腿微屈、头抬起）。按回车卸力…")
+        # Keep commanding while waiting: the bridge drops torque after 1 s without host traffic.
+        print("对照实物确认是 STAND 姿态（腿微屈、头抬起）。按回车卸力…", flush=True)
+        import select
+        while not select.select([sys.stdin], [], [], 0)[0]:
+            io.read()
+            io.write(safety.clamp(t))
+            io.wait_tick()
+        sys.stdin.readline()
     finally:
         io.set_torque(False)
         io.close()
