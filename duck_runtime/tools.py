@@ -14,6 +14,7 @@ This robot (default ``--backend bridge``): servos behind the ESP32-S3 MDK2 bridg
   python -m duck_runtime.tools live      --calib calib.json        # angles + IMU, live
   python -m duck_runtime.tools home-test --calib calib.json        # TORQUE: ease to HOME
   python -m duck_runtime.tools trim      --calib calib.json        # TORQUE, standing: hip-pitch trim
+  python -m duck_runtime.tools hip-roll  --calib calib.json        # TORQUE, standing: hip-roll preload sweep
 
 Order on a new robot: template -> scan -> zero -> direction -> imu-mount -> live (check) ->
 home-test (robot hanging) -> run.
@@ -540,6 +541,93 @@ def cmd_trim(args):
               f"R {before[1]} -> {cal.joints[RIGHT_HIP_PITCH].zero_raw}; saved {args.calib}. 再跑一次 trim 确认。")
 
 
+LEFT_HIP_ROLL, RIGHT_HIP_ROLL = 1, 11
+
+
+def hip_roll_spread(cal: Calibration, spread_rad: float) -> None:
+    """Shift both hip-roll zeros so the same command puts each leg spread_rad further OUT
+    (left hip roll + = outward, right hip roll + = inward)."""
+    c = 4096.0 / (2 * math.pi)
+    for k, e in ((LEFT_HIP_ROLL, +spread_rad), (RIGHT_HIP_ROLL, -spread_rad)):
+        j = cal.joints[k]
+        j.zero_raw = int(round(j.zero_raw + e * c * j.direction))
+
+
+def cmd_hip_roll(args):
+    """TORQUE ON, robot STANDING at HOME (hand near, not pushing). Spreads both legs in/out
+    by a few degrees around HOME and reads hip-roll current and trunk roll at each step.
+    Correct hip-roll zeros stand with the legs relaxed: low current on both, roll ~ 0."""
+    import select
+    from .safety import Safety
+    cal = Calibration.load(args.calib)
+    cal.validate()
+    io = open_io(args, cal)
+    if not hasattr(io, "currents"):
+        raise SystemExit("needs the bridge backend (current feedback)")
+    safety = Safety(cal.limits())
+    home = DEFAULT_POSITION.copy()
+    home[MOUTH_INDEX] = MOUTH_CLOSED
+    io.set_torque(False)
+    start = io.read().positions.copy()
+    input("鸭子放在平地上（先扶着），按回车上力矩回 HOME；之后两腿会依次外张/内收几度，手留在旁边别碰…")
+    io.set_torque(True)
+    rows = []
+
+    def hold(target, n, measure):
+        acc = []
+        for k in range(n):
+            s = io.read()
+            io.write(safety.clamp(target))
+            if measure and k >= n // 3 and s.imu_ready:
+                acc.append((abs(io.currents[LEFT_HIP_ROLL]), abs(io.currents[RIGHT_HIP_ROLL]),
+                            math.degrees(math.asin(s.imu.gravity[1]))))
+            io.wait_tick()
+        return np.mean(acc, axis=0) if acc else None
+
+    try:
+        for k in range(100):
+            a = min(1.0, k / 100)
+            io.read()
+            io.write(safety.clamp((1 - a) * start + a * home))
+            io.wait_tick()
+        hold(home, 75, False)
+        prev = home.copy()
+        for deg in (0, -6, -4, -2, 0, 2, 4, 6, 0):
+            t = home.copy()
+            t[LEFT_HIP_ROLL] += math.radians(deg)
+            t[RIGHT_HIP_ROLL] -= math.radians(deg)
+            for k in range(25):  # 0.5 s glide
+                a = (k + 1) / 25
+                io.read()
+                io.write(safety.clamp((1 - a) * prev + a * t))
+                io.wait_tick()
+            m = hold(t, 75, True)
+            prev = t
+            if m is not None:
+                rows.append((deg, *m))
+                print(f"  spread {deg:+3d} deg: hip roll |I| L {m[0]:5.0f}  R {m[1]:5.0f}  sum {m[0] + m[1]:5.0f} mA   trunk roll {m[2]:+5.1f} deg", flush=True)
+        best = min(rows[1:-1], key=lambda r: r[1] + r[2]) if len(rows) > 2 else None
+        at_home = [r[1] + r[2] for r in rows if r[0] == 0]
+        if best is not None and at_home and best[1] + best[2] > 0.8 * np.mean(at_home):
+            best = (0, *best[1:])  # less than 20% better than HOME itself: leave the zeros alone
+        if best is not None and best[0] != 0:
+            print(f"电流最小在 spread {best[0]:+d} deg（+ = 两腿外张）。输入 y 回车把髋横滚零位按此修正，直接回车放弃：", flush=True)
+        else:
+            print("HOME 本身电流最小，不用修正。按回车卸力。", flush=True)
+        while not select.select([sys.stdin], [], [], 0)[0]:
+            io.read()
+            io.write(safety.clamp(home))
+            io.wait_tick()
+        apply = best is not None and best[0] != 0 and sys.stdin.readline().strip().lower() == "y"
+    finally:
+        io.set_torque(False)
+        io.close()
+    if apply:
+        hip_roll_spread(cal, math.radians(best[0]))  # HOME now stands where the best spread stood
+        cal.save(args.calib)
+        print(f"hip roll zero_raw L {cal.joints[LEFT_HIP_ROLL].zero_raw}, R {cal.joints[RIGHT_HIP_ROLL].zero_raw}; saved {args.calib}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m duck_runtime.tools", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -551,7 +639,7 @@ def main(argv=None):
     for name, fn in [("scan", cmd_scan), ("relax", cmd_relax), ("step-test", cmd_step_test),
                      ("live", cmd_live), ("zero", cmd_zero),
                      ("direction", cmd_direction), ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test),
-                     ("trim", cmd_trim)]:
+                     ("trim", cmd_trim), ("hip-roll", cmd_hip_roll)]:
         p = sub.add_parser(name)
         add_robot_args(p)
         if name not in ("scan", "relax", "step-test"):

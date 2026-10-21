@@ -454,3 +454,17 @@ def test_hip_trim_moves_true_hip_angles_the_way_sim_says():
         assert moved == pytest.approx(expect, abs=2 * math.pi / 4096)
     assert all(a.zero_raw == b.zero_raw for i, (a, b) in enumerate(zip(cal.joints, old.joints))
                if i not in (LEFT_HIP_PITCH, RIGHT_HIP_PITCH))
+
+
+def test_hip_roll_spread_moves_both_legs_outward_for_the_same_command():
+    import copy
+    from duck_runtime.tools import LEFT_HIP_ROLL, RIGHT_HIP_ROLL, hip_roll_spread
+    cal = _calibrated()
+    old = copy.deepcopy(cal)
+    s = math.radians(4.0)
+    hip_roll_spread(cal, s)
+    q = C.DEFAULT_POSITION
+    dl = old.joints[LEFT_HIP_ROLL].to_rad(cal.joints[LEFT_HIP_ROLL].to_raw(q[LEFT_HIP_ROLL])) - q[LEFT_HIP_ROLL]
+    dr = old.joints[RIGHT_HIP_ROLL].to_rad(cal.joints[RIGHT_HIP_ROLL].to_raw(q[RIGHT_HIP_ROLL])) - q[RIGHT_HIP_ROLL]
+    assert dl == pytest.approx(+s, abs=2 * math.pi / 4096)   # left + = outward
+    assert dr == pytest.approx(-s, abs=2 * math.pi / 4096)   # right - = outward
