@@ -55,10 +55,15 @@ duck duck_runtime.tools direction --calib calib.json  # 逐关节按提示往正
 duck duck_runtime.tools imu-mount --calib calib.json  # 直立 + 前倾两个姿态
 duck duck_runtime.tools live      --calib calib.json  # 检查：零位附近读数≈0，直立 gravity≈[0,0,-1]
 duck duck_runtime.tools home-test --calib calib.json  # 吊起，上力矩 3 s 回 HOME，看每个关节误差
+duck duck_runtime.tools trim      --calib calib.json  # 平地站 HOME，按 IMU 修髋俯仰零位（跑两次）
 duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0.7 --log first.npz
 #   键：1 上力矩回 HOME → 2 启动策略 → w/s a/d 给指令；3 停止回 HOME；0 卸力；Ctrl+C 退出
 ```
 
+- 标定的坑（本机实测）：一次一条命令，别整段粘贴（后面的行会被当成回车吃掉）；
+  **零位时脖子竖直 = 两个俯仰舵机转轴连线竖直**，HOME 时脖子还要再后仰 20°——
+  若零位时就把脖子推到了后限位，策略起步时脖子会顶死；腿零位要躯干水平（zero 会打印躯干俯仰），
+  最后用 `trim` 让 HOME 站姿俯仰对上训练值（+2.5°），否则会一直往后退。
 - `scan` 里如果某个舵机 `acc/time/speed` 非 0（`<-- move limit set`）先告诉我：桥只写目标位置，
   这几个寄存器里的旧值会限制每次运动，和训练假设不一致。
 - 断力矩时关节若掰不动（减速比大），零位可用鸭子上已有的
