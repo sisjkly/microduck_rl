@@ -133,8 +133,9 @@ def _scan_bridge(args):
                 # here limits every move. Training assumed none (kissqy zeroes 44-47).
                 mv = b.native(i, 41, 7)
                 acc, t_lim, v_lim = mv[0], struct.unpack_from("<H", mv, 3)[0], struct.unpack_from("<H", mv, 5)[0]
-                regs = (f"RAM P/D {pd[0]}/{pd[1]}  acc/time/speed {acc}/{t_lim}/{v_lim}"
-                        + ("  <-- move limit set" if acc or t_lim or v_lim else ""))
+                lo, hi = struct.unpack("<HH", b.native(i, 9, 4))  # EEPROM angle limits: the servo clamps goals
+                regs = (f"RAM P/D {pd[0]}/{pd[1]}  acc/time/speed {acc}/{t_lim}/{v_lim}  angle limit {lo}..{hi}"
+                        + ("  <-- angle limit" if (lo or hi) and (lo, hi) != (0, 4095) else ""))
             except BridgeError as e:
                 regs = f"native read failed ({e})"
             ok = d["fresh"] and d["configured"] and not d["error"] and d["mode"] == 4
@@ -303,7 +304,18 @@ def cmd_zero(args):
     io.set_torque(False)
     print(cmd_zero.__doc__)
     input("Pose the robot, then press Enter to record...")
-    samples = [io.raw_positions() for _ in range(20)]
+    samples, grav = [], []
+    for _ in range(45):  # also warms the IMU decoder; trunk attitude tells whether the pose was level
+        s_ = io.read()
+        samples.append(io.raw_positions())
+        if s_.imu_ready:
+            grav.append(s_.imu.gravity)
+        time.sleep(0.02)
+    if grav:
+        g = np.mean(grav, axis=0)
+        pitch, roll = math.degrees(math.asin(max(-1, min(1, g[0])))), math.degrees(math.asin(max(-1, min(1, g[1]))))
+        print(f"  trunk at record: pitch {pitch:+.1f} deg (+ = nose down), roll {roll:+.1f} deg"
+              + ("   <-- trunk not level: hip zeros absorb this tilt" if abs(pitch) > 1.5 or abs(roll) > 1.5 else ""))
     only = set(args.joints.split(",")) if args.joints else None
     for j in cal.joints:
         if not j.id or (only and j.name not in only):
