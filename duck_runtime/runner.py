@@ -42,6 +42,7 @@ class TickLog:
     gravity: np.ndarray
     gyro: np.ndarray
     fallen: bool
+    currents: np.ndarray | None = None   # mA per joint, when the backend reports it (bridge)
 
 
 @dataclass
@@ -138,8 +139,10 @@ class Runner:
         if targets is not None:
             self.io.write(self.safety.clamp(targets))
         if self.log is not None:
+            cur = getattr(self.io, "currents", None)
             self.log.append(TickLog(s.t, self.state.value, obs, None if targets is None else targets.copy(),
-                                    s.positions.copy(), s.imu.gravity.copy(), s.imu.gyro.copy(), fallen))
+                                    s.positions.copy(), s.imu.gravity.copy(), s.imu.gyro.copy(), fallen,
+                                    None if cur is None else np.array(cur, dtype=float)))
         self.io.wait_tick()
         return s
 
