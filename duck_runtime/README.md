@@ -17,16 +17,37 @@
 仿真后端（`sim_io.py`，MuJoCo + BAM HD1910 + 813 g 质量配置）和真机后端走**同一套**
 控制器/安全/状态机代码，IMU 甚至在字节级仿真（编码 → `SflpDecoder` 解码）。
 
-## 硬件要求（先确认）
+## 硬件：本机四块板
 
-1. **舵机总线**：15 个 HD1910，ID 与官方一致：左腿 20–24，头颈 30–33，嘴 34，右腿 10–14；
-   波特率 **1 Mbps**（用飞特 FD 上位机设置 ID 和波特率）。
-2. **半双工转接**：需要自动方向切换（飞特 URT-1、微雪总线舵机转接板、或 74HC126 电路）。
-   - USB 转接：FTDI 芯片要把 latency_timer 设成 1 ms（见下），否则每次读写多等 16 ms。
-   - 若转接板会回显发送字节，运行时加 `--echo`。
-3. **IMU**：`feetech.py` 默认 IMU 是总线上 **ID 200 的 RevA 板（STM32G031 + LSM6DSV16X）刷 FT6 固件**
-   （kissqy `hardware/IMU-FIRMWARE.md`）。其他 IMU 通过 `FeetechIO(imu_source=...)` 接入，
-   需提供躯干系角速度（rad/s）和重力投影（直立 = [0,0,-1]）。
+```
+                USB (micro-USB OTG)            TTL 半双工 1 Mbps
+ Pi Zero 2W ───────────────────► FE-URT-2 ─────────────────► 15× HD1910（ID 见下）
+   GPIO14 TXD ─► ESP32 RX(16)
+   GPIO15 RXD ◄─ ESP32 TX(17)       I²C 400 kHz
+   GND ──────── ESP32 GND   ESP32 ──────────────► LSM6DSV16X（固定在躯干上）
+```
+
+1. **舵机**：HD1910 ID 与官方一致：左腿 20–24，头颈 30–33，嘴 34，右腿 10–14；波特率 **1 Mbps**
+   （飞特 FD 上位机设置）。FE-URT-2 自带方向切换；回显自动检测（`--echo auto`），
+   串口打开时自动设低延迟模式。
+2. **IMU = LSM6DSV16X，与官方 imu_to_dxl 板同一颗芯片**，由 ESP32 读取：
+   `esp32_imu/` 固件用 ST 官方驱动、按官方/FT6 完全相同的配置（±4 g、±500 dps、120 Hz、
+   SFLP game rotation 120 Hz）打出**与官方逐字节相同的 12 字节块**，经 UART 921600 发给 Pi，
+   Pi 端 `esp32_link.py` 用同一个 `SflpDecoder` 解码。
+   - **IMU 必须刚性固定在躯干上**（官方 IMU 板在躯干里）：策略观测的是躯干姿态，装在头上会跟着脖子转。
+   - 朝向不用对齐，`tools imu-mount` 用两个姿态测出安装四元数。
+   - 链路超时（帧 >50 ms 或四元数 >100 ms 没更新）或 ESP32 报传感器错误 → 拒绝启动；运行中则立即卸力。
+3. **Pi 的 GPIO 串口**（给 ESP32 用，URT-2 占了唯一的 USB 口）：
+   `sudo raspi-config` → Interface → Serial：login shell **否**、hardware **是**；
+   `/boot/firmware/config.txt` 加 `dtoverlay=disable-bt`（把稳定的 PL011 串口给 GPIO14/15），重启后用 `/dev/serial0`。
+   也可以给 Pi 接 USB Hub，把 ESP32 走 USB（固件 `-DLINK_USB=1`，端口变成 `/dev/ttyUSB*` 或 `/dev/ttyACM*`）。
+
+### 烧录 ESP32
+```bash
+cd duck_runtime/esp32_imu
+pio run -e esp32dev -t upload      # 按板子改 platformio.ini 的 board 和引脚
+```
+上电后用 `tools scan --imu-port /dev/serial0` 检查：应约 200 帧/秒、校验错误为 0、`ready=True`。
 
 ## Pi Zero 2W 环境
 
@@ -46,16 +67,16 @@ sudo usermod -aG dialout $USER   # 串口权限，重新登录生效
 ## 上机流程（按顺序，一次只验证一件事）
 
 ```bash
-P=/dev/ttyUSB0
-python -m duck_runtime.tools template calib.json            # 生成标定模板
-python -m duck_runtime.tools scan --port $P                 # 16 个设备都应应答
-python -m duck_runtime.tools zero --port $P --calib calib.json       # 零位：腿伸直、头摆正
-python -m duck_runtime.tools direction --port $P --calib calib.json  # 逐关节核对正方向
-python -m duck_runtime.tools imu-mount --port $P --calib calib.json  # 直立 + 前倾两个姿态
-python -m duck_runtime.tools live --port $P --calib calib.json       # 检查：角度、重力投影
-python -m duck_runtime.tools home-test --port $P --calib calib.json  # 吊起，上力矩回 HOME
-python -m duck_runtime.run --backend feetech --port $P --calib calib.json \
-       --policy velstand.onnx --log first.npz                        # 1 上力矩 → 2 启动策略
+A="--port /dev/ttyUSB0 --imu-port /dev/serial0"
+python -m duck_runtime.tools template calib.json          # 生成标定模板
+python -m duck_runtime.tools scan $A                      # 15 个舵机应答 + IMU 链路 ~200 帧/秒
+python -m duck_runtime.tools zero $A --calib calib.json       # 零位：腿伸直、头摆正
+python -m duck_runtime.tools direction $A --calib calib.json  # 逐关节核对正方向
+python -m duck_runtime.tools imu-mount $A --calib calib.json  # 直立 + 前倾两个姿态
+python -m duck_runtime.tools live $A --calib calib.json       # 检查：角度、重力投影
+python -m duck_runtime.tools home-test $A --calib calib.json  # 吊起，上力矩回 HOME
+python -m duck_runtime.run --backend feetech $A --calib calib.json \
+       --policy velstand.onnx --action-scale 0.7 --log first.npz   # 1 上力矩 → 2 启动策略
 ```
 
 - `run` 会拒绝未完成标定（`calibrated` / `imu_mount_verified`）的配置。
@@ -78,5 +99,8 @@ python -m duck_runtime.run --backend sim --policy velstand.onnx --viewer
 | 官方默认 0.9 + 低通 | 0.15 | −0.14 | 0.03 | 0.57 | 1/48 |
 | 训练时 1.0 无滤波 | 0.15 | −0.18 | 0.05 | 0.60 | 1/48 |
 
-`tests/test_duck_runtime.py`：观测布局、HOME、关节顺序与训练端一致；IMU 安装姿态往返；
-控制器缩放/滤波语义；飞特报文编解码；状态机（不请求不动、看门狗、跌倒卸力）。
+`tests/test_duck_runtime.py`（23 项）：观测布局、HOME、关节顺序与训练端一致；IMU 安装姿态往返；
+控制器缩放/滤波语义；状态机（不请求不动、看门狗、跌倒卸力、倒地拒绝启动）；
+ESP32 帧解析/校验/超时判定，以及经真实伪终端 200 Hz 推流；`FeetechIO` 对接一条**模拟的
+HD1910 总线**（伪终端另一端按飞特协议应答，含回显/无回显两种）完成读、上力矩（P=5/D=0/
+限 1000 回读校验）、写目标、卸力。ESP32 固件做了语法级编译（真机工具链在沙箱里装不上）。

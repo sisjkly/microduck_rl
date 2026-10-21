@@ -1,12 +1,14 @@
 """Bring-up tools for the real robot. Run on the Pi, robot powered, torque OFF unless stated.
 
   python -m duck_runtime.tools template  calib.json              # start a calibration file
-  python -m duck_runtime.tools scan      --port /dev/ttyUSB0       # who answers on the bus
+  python -m duck_runtime.tools scan      --port /dev/ttyUSB0 --imu-port /dev/serial0   # bus + IMU link
   python -m duck_runtime.tools live      --port ... --calib calib.json   # angles + IMU, live
   python -m duck_runtime.tools zero      --port ... --calib calib.json   # record zero_raw
   python -m duck_runtime.tools direction --port ... --calib calib.json   # verify signs
   python -m duck_runtime.tools imu-mount --port ... --calib calib.json   # two-pose IMU mount
   python -m duck_runtime.tools home-test --port ... --calib calib.json   # TORQUE: ease to HOME
+
+With the ESP32 IMU bridge, add ``--imu-port /dev/serial0`` to every command.
 
 Order on a new robot: template -> scan -> zero -> direction -> imu-mount -> live (check) ->
 home-test (robot hanging) -> run.
@@ -47,9 +49,22 @@ POSITIVE = {
 }
 
 
+def _echo(args):
+    return True if args.echo == "yes" else False if args.echo == "no" else "auto"
+
+
+def make_imu_source(imu_port: str | None, mount):
+    """None -> IMU on the servo bus (FT6, ID 200); a serial port -> ESP32 bridge."""
+    if not imu_port:
+        return None
+    from .esp32_link import Esp32Imu
+    return Esp32Imu(imu_port, mount=mount)
+
+
 def _io(args):
     from .feetech import FeetechIO
-    return FeetechIO(args.port, Calibration.load(args.calib), echo=args.echo)
+    cal = Calibration.load(args.calib)
+    return FeetechIO(args.port, cal, echo=_echo(args), imu_source=make_imu_source(args.imu_port, cal.imu_mount))
 
 
 def _raw_positions(io) -> dict[int, int]:
@@ -66,8 +81,9 @@ def cmd_template(args):
 def cmd_scan(args):
     from .feetech import FeetechBus, REG_FEEDBACK, FEEDBACK_LEN, _signmag
     from .contract import JOINT_IDS
-    bus = FeetechBus(args.port, echo=args.echo)
-    for name, i in [*zip(JOINT_NAMES, JOINT_IDS), ("imu", IMU_ID)]:
+    bus = FeetechBus(args.port, echo=_echo(args))
+    devices = list(zip(JOINT_NAMES, JOINT_IDS)) + ([] if args.imu_port else [("imu", IMU_ID)])
+    for name, i in devices:
         if not bus.ping(i):
             print(f"  {i:3d} {name:16s} -- no answer")
             continue
@@ -78,7 +94,18 @@ def cmd_scan(args):
         except Exception as e:  # noqa: BLE001
             extra = f"read failed: {e}"
         print(f"  {i:3d} {name:16s} ok  {extra}")
+    print(f"  adapter echo: {bus.echo}   bad packets: {bus.bad_packets}")
     bus.close()
+    if args.imu_port:
+        from .esp32_link import Esp32Imu
+        imu = Esp32Imu(args.imu_port)
+        time.sleep(1.0)
+        _, ready = imu.read()
+        for _ in range(30):
+            _, ready = imu.read()
+            time.sleep(0.02)
+        print(f"  ESP32 IMU on {args.imu_port}: {imu.frames} frames/s, bad crc {imu.parser.bad_crc}, ready={ready}")
+        imu.close()
 
 
 def cmd_live(args):
@@ -156,14 +183,17 @@ def _sensor_gravity(io) -> np.ndarray:
     """Gravity in the IMU's own frame (mount ignored), averaged over 1 s."""
     from .imu import SflpDecoder, IDENTITY_MOUNT, rotate_inverse
     dec = SflpDecoder(IDENTITY_MOUNT)
-    from .feetech import REG_FEEDBACK, FEEDBACK_LEN
     acc = []
     for _ in range(50):
-        raw = io.bus.sync_read(REG_FEEDBACK, FEEDBACK_LEN, [IMU_ID])[IMU_ID]
-        d = dec.decode(raw[:12])
-        acc.append(rotate_inverse(d.quat, np.array([0.0, 0.0, -1.0])))
+        block = io.raw_imu_block()
+        if block is not None:
+            d = dec.decode(block)
+            if dec.quat_samples:
+                acc.append(rotate_inverse(d.quat, np.array([0.0, 0.0, -1.0])))
         time.sleep(0.02)
-    g = np.mean(acc[10:], axis=0)
+    if len(acc) < 20:
+        raise RuntimeError("IMU gives no quaternion: check wiring / ESP32 firmware (tools scan)")
+    g = np.mean(acc[len(acc) // 4:], axis=0)
     return g / np.linalg.norm(g)
 
 
@@ -237,7 +267,9 @@ def main(argv=None):
                      ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test)]:
         p = sub.add_parser(name)
         p.add_argument("--port", required=True)
-        p.add_argument("--echo", action="store_true", help="adapter echoes TX bytes")
+        p.add_argument("--echo", choices=["auto", "yes", "no"], default="auto", help="adapter echoes TX bytes")
+        p.add_argument("--imu-port", default=None, help="ESP32 IMU bridge serial port (e.g. /dev/serial0); "
+                       "omit when the IMU board sits on the servo bus as ID 200")
         if name != "scan":
             p.add_argument("--calib", required=True)
         if name in ("zero", "direction"):

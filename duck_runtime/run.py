@@ -3,7 +3,8 @@
   # rehearse on a laptop (MuJoCo viewer if a display is available)
   python -m duck_runtime.run --backend sim --policy velstand.onnx --viewer
   # on the robot (Pi), after duck_runtime.tools calibration
-  python -m duck_runtime.run --backend feetech --port /dev/ttyUSB0 --calib calib.json --policy velstand.onnx
+  python -m duck_runtime.run --backend feetech --port /dev/ttyUSB0 --imu-port /dev/serial0 \
+      --calib calib.json --policy velstand.onnx
 
 Keys:  1 enable (torque on, ease to HOME)   2 start policy   3 stop (back to HOME)
        0 limp (torque off)                  w/s vx +-0.05    z/c vy +-0.05
@@ -60,7 +61,8 @@ def main(argv=None):
                     help="official: scale 0.9 + low-pass 0.5/0.7 (robotd defaults); trained: 1.0, no filter")
     ap.add_argument("--action-scale", type=float, default=None, help="override, e.g. 0.7 for a timid first run")
     ap.add_argument("--port", default="/dev/ttyUSB0")
-    ap.add_argument("--echo", action="store_true")
+    ap.add_argument("--echo", choices=["auto", "yes", "no"], default="auto")
+    ap.add_argument("--imu-port", default=None, help="ESP32 IMU bridge port (e.g. /dev/serial0)")
     ap.add_argument("--calib")
     ap.add_argument("--viewer", action="store_true", help="sim only")
     ap.add_argument("--keep-on-fall", action="store_true", help="keep driving after a fall (official default)")
@@ -82,7 +84,8 @@ def main(argv=None):
             ap.error("--calib is required on the robot")
         cal = Calibration.load(args.calib)
         cal.validate(require_calibrated=True)
-        io = FeetechIO(args.port, cal, echo=args.echo)
+        from .tools import _echo, make_imu_source
+        io = FeetechIO(args.port, cal, echo=_echo(args), imu_source=make_imu_source(args.imu_port, cal.imu_mount))
         safety = Safety(cal.limits())
 
     log: list[TickLog] | None = [] if args.log else None
@@ -124,7 +127,7 @@ def main(argv=None):
                 if now - last_print > 0.5:
                     last_print = now
                     print(f"\r[{runner.state.value:4s}] cmd vx {vx:+.2f} vy {vy:+.2f} wz {wz:+.2f}  "
-                          f"falls {runner.fall_events}   ", end="", flush=True)
+                          f"falls {runner.fall_events}  {runner.refusal}   ", end="", flush=True)
                 if args.backend == "sim":  # real time for a human at the keyboard
                     time.sleep(max(0.0, io.control_dt - (time.monotonic() - t0)))
     except KeyboardInterrupt:

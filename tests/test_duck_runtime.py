@@ -239,3 +239,212 @@ def test_runner_refuses_to_start_when_lying(sim_runner):
     assert r.state is State.HOLD
     assert r.start() is False and r.refusal == "robot is not upright"
     assert r.state is State.HOLD
+
+
+# -- ESP32 IMU bridge ------------------------------------------------------------------------
+
+def _block_for(q_trunk, gyro_trunk, mount=DEFAULT_MOUNT):
+    return encode_block(rotate_inverse(mount, gyro_trunk), quat_mul(q_trunk, mount))
+
+
+def test_frame_parser_resyncs_and_checks_crc():
+    from duck_runtime.esp32_link import FrameParser, make_frame
+    blk = bytes(range(12))
+    good = make_frame(7, 3, blk)
+    bad = bytearray(make_frame(8, 3, blk)); bad[10] ^= 0xFF
+    p = FrameParser()
+    out = p.feed(b"\x00\xa5\x13" + bytes(bad) + good[:5]) + p.feed(good[5:] + make_frame(9, 1, blk))
+    assert [(s, f) for s, f, _ in out] == [(7, 3), (9, 1)] and out[0][2] == blk
+    assert p.bad_crc == 1
+
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+class _NullSerial:
+    in_waiting = 0
+
+    def read(self, n):
+        import time as _t
+        _t.sleep(0.001)
+        return b""
+
+    def close(self):
+        pass
+
+
+def test_esp32_imu_readiness_and_staleness():
+    from duck_runtime.esp32_link import Esp32Imu, make_frame
+    clk = _FakeClock()
+    imu = Esp32Imu(serial_obj=_NullSerial(), clock=clk)
+    q = np.array([math.cos(0.1), 0.0, math.sin(0.1), 0.0])  # pitched ~11.5 deg
+    blk = _block_for(q, np.array([0.1, -0.2, 0.3]))
+    _, ready = imu.read()
+    assert not ready
+    for k in range(30):
+        clk.t = k * 0.005
+        imu.ingest(make_frame(k, 3, blk))
+        data, ready = imu.read()
+    assert ready
+    np.testing.assert_allclose(data.gravity, rotate_inverse(q, np.array([0, 0, -1.0])), atol=3e-3)
+    np.testing.assert_allclose(data.gyro, [0.1, -0.2, 0.3], atol=2e-3)
+    clk.t += 0.06                      # link silent for 60 ms
+    assert imu.read()[1] is False
+    imu.ingest(make_frame(99, 2, blk))  # frames resume but no fresh quaternion for > 100 ms
+    clk.t += 0.06
+    imu.ingest(make_frame(100, 2, blk))
+    assert imu.read()[1] is False
+    imu.ingest(make_frame(101, 3 | 4, blk))  # sensor error flag
+    assert imu.read()[1] is False
+    imu.close()
+
+
+def test_esp32_imu_over_a_real_pty():
+    """The reader thread + pyserial against a pseudo-terminal streaming frames at 200 Hz."""
+    import os, pty, threading, time as _t
+    serial = pytest.importorskip("serial")
+    from duck_runtime.esp32_link import Esp32Imu, make_frame
+    master, slave = pty.openpty()
+    imu = Esp32Imu(os.ttyname(slave), baud=921600)
+    stop = threading.Event()
+    blk = _block_for(np.array([1.0, 0, 0, 0]), np.zeros(3))
+
+    def writer():
+        k = 0
+        while not stop.is_set():
+            os.write(master, make_frame(k, 3, blk)); k += 1
+            _t.sleep(0.005)
+
+    th = threading.Thread(target=writer, daemon=True); th.start()
+    try:
+        _t.sleep(0.4)
+        for _ in range(30):
+            data, ready = imu.read()
+            _t.sleep(0.005)
+        assert imu.frames > 40 and ready
+        np.testing.assert_allclose(data.gravity, [0, 0, -1], atol=3e-3)
+    finally:
+        stop.set(); th.join(); imu.close(); os.close(master); os.close(slave)
+
+
+# -- Feetech bus against a simulated HD1910 bus on a pty --------------------------------------
+
+class _FakeFeetechBus:
+    """Answers like 15 HD1910s + an FT6 IMU: PING / READ / WRITE / SYNC_READ / SYNC_WRITE
+    on a flat 256-byte register file per ID. Optionally echoes what the host sends."""
+
+    def __init__(self, fd, ids, echo=False, imu_block=None):
+        import threading
+        self.fd, self.echo = fd, echo
+        self.regs = {i: bytearray(256) for i in ids}
+        for i in ids:
+            self.regs[i][56:58] = (2048).to_bytes(2, "little")
+            self.regs[i][62] = 76  # 7.6 V
+        if imu_block is not None:
+            self.regs[200] = bytearray(256)
+            self.regs[200][56:68] = imu_block
+        self.buf = b""
+        self.stop = threading.Event()
+        self.th = threading.Thread(target=self._run, daemon=True)
+        self.th.start()
+
+    def _reply(self, id_, data=b""):
+        body = bytes([id_, len(data) + 2, 0]) + data
+        import os
+        os.write(self.fd, b"\xff\xff" + body + bytes([(~sum(body)) & 0xFF]))
+
+    def _run(self):
+        import os, select
+        while not self.stop.is_set():
+            if not select.select([self.fd], [], [], 0.01)[0]:
+                continue
+            chunk = os.read(self.fd, 4096)
+            self.buf += chunk
+            while len(self.buf) >= 6:
+                i = self.buf.find(b"\xff\xff")
+                if i < 0:
+                    self.buf = b""; break
+                self.buf = self.buf[i:]
+                n = self.buf[3] + 4
+                if len(self.buf) < n:
+                    break
+                pkt, self.buf = self.buf[:n], self.buf[n:]
+                if self.echo:
+                    os.write(self.fd, pkt)
+                id_, ins, p = pkt[2], pkt[4], pkt[5:-1]
+                if ins == 0x01 and id_ in self.regs:
+                    self._reply(id_)
+                elif ins == 0x02 and id_ in self.regs:
+                    self._reply(id_, bytes(self.regs[id_][p[0]:p[0] + p[1]]))
+                elif ins == 0x03 and id_ in self.regs:
+                    self.regs[id_][p[0]:p[0] + len(p) - 1] = p[1:]
+                    self._reply(id_)
+                elif ins == 0x82:
+                    addr, ln = p[0], p[1]
+                    for rid in p[2:]:
+                        if rid in self.regs:
+                            self._reply(rid, bytes(self.regs[rid][addr:addr + ln]))
+                elif ins == 0x83:
+                    addr, w = p[0], p[1]
+                    rows = p[2:]
+                    for k in range(0, len(rows), w + 1):
+                        rid = rows[k]
+                        if rid in self.regs:
+                            self.regs[rid][addr:addr + w] = rows[k + 1:k + 1 + w]
+                            if addr == 42:  # goal -> present position (perfect servo)
+                                self.regs[rid][56:58] = rows[k + 1:k + 3]
+
+    def close(self):
+        self.stop.set(); self.th.join()
+
+
+def _eventually(pred, timeout=0.5):
+    """Sync writes get no status reply, so the host returns before the fake bus applied them."""
+    import time as _t
+    end = _t.monotonic() + timeout
+    while _t.monotonic() < end:
+        if pred():
+            return True
+        _t.sleep(0.005)
+    return pred()
+
+
+@pytest.mark.parametrize("echo", [False, True])
+def test_feetech_io_against_simulated_bus(echo):
+    import os, pty
+    pytest.importorskip("serial")
+    from duck_runtime.feetech import FeetechIO, REG_RAM_P, REG_TORQUE
+    master, slave = pty.openpty()
+    import tty as _tty
+    _tty.setraw(master); _tty.setraw(slave)
+    q = np.array([math.cos(0.05), math.sin(0.05), 0.0, 0.0])
+    fake = _FakeFeetechBus(master, list(C.JOINT_IDS), echo=echo, imu_block=_block_for(q, np.zeros(3)))
+    cal = Calibration.template()
+    io = FeetechIO(os.ttyname(slave), cal)
+    try:
+        s = io.read()
+        assert io.bus.echo is echo
+        np.testing.assert_allclose(s.positions, [0.0] * 15, atol=1e-9)  # raw 2048 = zero_raw
+        assert io.voltages.min() == pytest.approx(7.6)
+        for _ in range(2):  # 3-sample median: the first two reads still hold the default
+            s = io.read()
+        np.testing.assert_allclose(s.imu.gravity, rotate_inverse(q, [0, 0, -1.0]), atol=3e-3)
+        io.set_torque(True)
+        assert _eventually(lambda: all(fake.regs[i][REG_RAM_P] == 5 and fake.regs[i][51] == 0
+                                       and fake.regs[i][REG_TORQUE] == 1 for i in C.JOINT_IDS))
+        assert all(int.from_bytes(fake.regs[i][48:50], "little") == 1000 for i in C.JOINT_IDS)
+        target = C.DEFAULT_POSITION.copy()
+        io.write(target)
+        _eventually(lambda: fake.regs[C.JOINT_IDS[2]][56:58] != (2048).to_bytes(2, "little"))
+        s = io.read()
+        expect = [j.to_rad(j.to_raw(t)) for j, t in zip(cal.joints, target)]
+        np.testing.assert_allclose(s.positions, expect, atol=1e-9)
+        io.set_torque(False)
+        assert _eventually(lambda: all(fake.regs[i][REG_TORQUE] == 0 for i in C.JOINT_IDS))
+    finally:
+        io.close(); fake.close(); os.close(master)

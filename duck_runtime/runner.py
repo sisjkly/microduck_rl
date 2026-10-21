@@ -120,9 +120,11 @@ class Runner:
         elif self.state is State.HOLD:
             targets = DEFAULT_POSITION.copy()
             targets[MOUTH_INDEX] = MOUTH_CLOSED
+        elif self.state is State.RUN and not s.imu_ready:
+            # Never run the policy on a stale/default orientation: go limp, say why.
+            self.refusal = "IMU stopped updating while running"
+            self.limp()
         elif self.state is State.RUN:
-            if not s.imu_ready:
-                raise RuntimeError("IMU not ready: refusing to run the policy on a default orientation")
             cmd = self.safety.gate_command(self.command, s.t - self._command_t)
             targets = self.controller.step(s, cmd)
             obs = self.controller.last_obs

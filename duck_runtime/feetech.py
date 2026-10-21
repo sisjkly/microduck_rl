@@ -19,10 +19,13 @@ every torque-on.
 IMU: the FT6 firmware on the RevA board (STM32G031 + LSM6DSV16X) answers as ID 200 on
 this bus; its address-56 block starts with the same 12 bytes as the official imu_to_dxl
 board (gyro + SFLP quaternion), decoded by imu.SflpDecoder. A different IMU can be
-plugged in through ``imu_source`` (any callable returning (ImuData, ready)).
+plugged in through ``imu_source``: any object with ``read() -> (ImuData, ready)`` and
+``latest_block() -> bytes | None`` — e.g. ``esp32_link.Esp32Imu`` for an LSM6DSV16X
+read by an ESP32 and streamed over a UART.
 
 Half-duplex: the adapter must switch direction itself (Feetech URT-1, Waveshare bus
-servo adapters, or a 74HC126-style circuit). If it echoes what it sends, pass echo=True.
+servo adapters, or a 74HC126-style circuit). Echo of the sent bytes is auto-detected on
+the first ping (echo="auto"); force it with echo=True/False.
 """
 
 from __future__ import annotations
@@ -30,7 +33,6 @@ from __future__ import annotations
 import math
 import struct
 import time
-from typing import Callable
 
 import numpy as np
 
@@ -75,9 +77,13 @@ def _signmag_word(value: int) -> int:
 
 
 class FeetechBus:
-    def __init__(self, port: str, baud: int = BAUD, timeout_s: float = 0.01, echo: bool = False):
+    def __init__(self, port: str, baud: int = BAUD, timeout_s: float = 0.01, echo: bool | str = "auto"):
         import serial  # pyserial
         self.ser = serial.Serial(port, baud, timeout=timeout_s)
+        try:  # ASYNC_LOW_LATENCY: no driver-side batching of RX bytes (FTDI/CH34x/CP210x)
+            self.ser.set_low_latency_mode(True)
+        except Exception:  # noqa: BLE001 - not supported by every driver/platform
+            pass
         self.echo = echo
         self.bad_packets = 0
         self._rx = b""
@@ -90,8 +96,20 @@ class FeetechBus:
         self._rx = b""
         self.ser.write(pkt)
         self.ser.flush()
-        if self.echo:
+        if self.echo == "auto":
+            self._detect_echo(pkt)
+        elif self.echo:
             self.ser.read(len(pkt))
+
+    def _detect_echo(self, pkt: bytes) -> None:
+        """First transaction: does the adapter hand our own bytes back?"""
+        head = self.ser.read(len(pkt))
+        if head == pkt:
+            self.echo = True
+        elif head:  # something else answered first: no echo
+            self.echo = False
+            self._rx = head
+        # nothing at all (e.g. pinging an absent ID): stay "auto", decide next time
 
     def _status(self, deadline: float) -> tuple[int, int, bytes]:
         """Next status packet. Bytes after it stay in self._rx for the next call (a sync
@@ -154,8 +172,8 @@ class FeetechBus:
 
 
 class FeetechIO(RobotIO):
-    def __init__(self, port: str, calibration: Calibration, echo: bool = False,
-                 imu_source: Callable[[], tuple[ImuData, bool]] | None = None, control_dt: float = 0.02):
+    def __init__(self, port: str, calibration: Calibration, echo: bool | str = "auto",
+                 imu_source=None, control_dt: float = 0.02):
         calibration.validate()
         self.cal = calibration
         self.bus = FeetechBus(port, echo=echo)
@@ -189,7 +207,7 @@ class FeetechIO(RobotIO):
             imu = self.decoder.decode(raw[IMU_ID][:BLOCK_LEN])
             ready = self.decoder.ready
         else:
-            imu, ready = self.imu_source()
+            imu, ready = self.imu_source.read()
         return Sensors(positions=pos, velocities=vel, imu=imu, imu_ready=ready, t=self.now())
 
     def now(self) -> float:
@@ -224,5 +242,13 @@ class FeetechIO(RobotIO):
         else:  # overrun: resynchronise instead of bursting
             self._next_tick = time.monotonic()
 
+    def raw_imu_block(self) -> bytes | None:
+        """The current 12-byte SFLP block, whichever way the IMU is wired (calibration tools)."""
+        if self.imu_on_bus:
+            return self.bus.sync_read(REG_FEEDBACK, FEEDBACK_LEN, [IMU_ID])[IMU_ID][:BLOCK_LEN]
+        return self.imu_source.latest_block()
+
     def close(self) -> None:
         self.bus.close()
+        if self.imu_source is not None:
+            self.imu_source.close()
