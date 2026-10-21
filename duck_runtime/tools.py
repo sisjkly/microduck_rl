@@ -16,6 +16,7 @@ This robot (default ``--backend bridge``): servos behind the ESP32-S3 MDK2 bridg
   python -m duck_runtime.tools trim      --calib calib.json        # TORQUE, standing: hip-pitch trim
   python -m duck_runtime.tools hip-roll  --calib calib.json        # TORQUE, standing: hip-roll preload sweep
   python -m duck_runtime.tools imu-snap  --calib calib.json        # square IMU board: snap mount to axis-aligned
+  python -m duck_runtime.tools pose-check --calib calib.json       # TORQUE, hanging: robot moves, you judge signs
 
 Order on a new robot: template -> scan -> zero -> direction -> imu-mount -> live (check) ->
 home-test (robot hanging) -> run.
@@ -46,7 +47,7 @@ POSITIVE = {
     "left_hip_pitch": "左腿整体向后摆",
     "left_knee": "左小腿/脚向前摆",
     "left_ankle": "左脚尖向下（踮脚方向）",
-    "neck_pitch": "脖子向后仰（头整体后移、上抬）",
+    "neck_pitch": "脖子向后仰（整个头往后移，嘴那一侧略抬起）",
     "head_pitch": "低头（嘴向前下方）",
     "head_yaw": "头向左转",
     "head_roll": "头向左歪（镜头向左偏）",
@@ -479,6 +480,73 @@ def cmd_imu_snap(args):
         print(f"saved {args.calib}. 接着跑 trim（髋俯仰）让 HOME 站姿重新对上。")
 
 
+def cmd_pose_check(args):
+    """TORQUE ON, robot HANGING (feet off the ground). From HOME, moves one joint at a time
+    +15 deg and asks whether it moved the way the MJCF says positive is. Unlike `direction`
+    (you move the joint, the encoder judges), here the robot moves and you judge -- it also
+    catches joints whose HOME value is ~0 (knees, hip yaw, head yaw/roll), which home-test
+    cannot reveal. Answer n to flip that joint's direction (zero_raw is unaffected)."""
+    import select
+    from .safety import Safety
+    cal = Calibration.load(args.calib)
+    cal.validate()
+    io = open_io(args, cal)
+    safety = Safety(cal.limits())
+    home = DEFAULT_POSITION.copy()
+    home[MOUTH_INDEX] = MOUTH_CLOSED
+    io.set_torque(False)
+    start = io.read().positions.copy()
+    input("机器人吊起、脚离地，按回车上力矩回 HOME…")
+    io.set_torque(True)
+    flips = []
+
+    def glide(a, b, n):
+        for k in range(n):
+            x = (k + 1) / n
+            io.read()
+            io.write(safety.clamp((1 - x) * a + x * b))
+            io.wait_tick()
+
+    def hold_until_line(t):
+        while not select.select([sys.stdin], [], [], 0)[0]:
+            io.read()
+            io.write(safety.clamp(t))
+            io.wait_tick()
+        return sys.stdin.readline().strip().lower()
+
+    try:
+        glide(start, home, 100)
+        only = set(args.joints.split(",")) if args.joints else None
+        for k, j in enumerate(cal.joints):
+            if not j.id or (only and j.name not in only):
+                continue
+            t = home.copy()
+            t[k] += math.radians(15)
+            glide(home, t, 25)
+            print(f"\n[{j.name} / ID {j.id}] 刚才应该是：{POSITIVE[j.name]}（约 15 度）。对吗？y 回车=对，n 回车=反了，r 回车=再动一次：", flush=True)
+            while True:
+                ans = hold_until_line(t)
+                if ans != "r":
+                    break
+                glide(t, home, 25)
+                glide(home, t, 25)
+                print("  再看一次，y / n / r：", flush=True)
+            if ans == "n":
+                flips.append(j.name)
+            glide(t, home, 25)
+    finally:
+        io.set_torque(False)
+        io.close()
+    for j in cal.joints:
+        if j.name in flips:
+            j.direction *= -1
+    if flips:
+        cal.save(args.calib)
+        print(f"flipped {flips}; saved {args.calib}. 方向改了：重新跑 home-test 确认 HOME 姿态。")
+    else:
+        print("所有检查的关节方向都对。")
+
+
 def cmd_home_test(args):
     """TORQUE ON. Robot hanging, feet off the ground: ease to HOME over 3 s, hold, report error."""
     from .safety import Safety
@@ -689,7 +757,8 @@ def main(argv=None):
     for name, fn in [("scan", cmd_scan), ("relax", cmd_relax), ("step-test", cmd_step_test),
                      ("live", cmd_live), ("zero", cmd_zero),
                      ("direction", cmd_direction), ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test),
-                     ("trim", cmd_trim), ("hip-roll", cmd_hip_roll), ("imu-snap", cmd_imu_snap)]:
+                     ("trim", cmd_trim), ("hip-roll", cmd_hip_roll), ("imu-snap", cmd_imu_snap),
+                     ("pose-check", cmd_pose_check)]:
         p = sub.add_parser(name)
         add_robot_args(p)
         if name not in ("scan", "relax", "step-test"):
@@ -697,7 +766,7 @@ def main(argv=None):
         if name == "step-test":
             p.add_argument("--id", type=int, default=13, help="bridge ID (13 = head_yaw)")
             p.add_argument("--counts", type=int, default=150, help="step size in encoder counts (150 = 13 deg)")
-        if name in ("zero", "direction"):
+        if name in ("zero", "direction", "pose-check"):
             p.add_argument("--joints", default="", help="comma-separated subset")
         if name == "home-test":
             p.add_argument("--head-cmd", default="0,0,0,0",
