@@ -35,7 +35,7 @@ TAG_GAME_RV = 0x13
 SW_POR, EMB_ACCESS = 0x04, 0x80
 ODR_120HZ, SFLP_120HZ = 0x6, 0x3
 FIFO_STREAM = 0x6
-MAX_DRAIN = 16          # ~45 ms of SFLP at 120 Hz; a longer backlog is reset, not replayed
+MAX_DRAIN = 64          # ~0.5 s of SFLP at 120 Hz (slow-polling tools); longer: reset, not replayed
 QUAT_MAX_AGE_S = 0.10   # like the official 100 ms IMU freshness window
 ERRORS_BEFORE_REINIT = 10
 
