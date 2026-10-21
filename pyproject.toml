@@ -107,3 +107,7 @@ name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"
 # explicit: only packages that name this index resolve from it.
 explicit = true
+
+[tool.pytest.ini_options]
+# duck_runtime/ (robot-side runtime) lives at the repo root, outside the src/ package.
+pythonpath = ["."]
