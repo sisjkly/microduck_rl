@@ -26,13 +26,40 @@ from mjlab.actuator.actuator import ActuatorCmd
 
 
 class FrictionDRBamActuator(BamActuator):
-    """BamActuator + per-env friction_scale on the BAM friction budget."""
+    """BamActuator + per-env friction_scale on the BAM friction budget.
+
+    Also supports Feetech-style servos (bam STS3215Actuator law, used for the
+    HD1910 fit): their firmware tracks an internal velocity-clamped target
+    ``q_target_smooth``. It is kept per env as an (N, J) tensor and snapped to
+    the measured position on the first step after a reset (a powered servo's
+    internal goal starts where the horn is), mirroring kissqy's
+    Hd1910Actuator / fanhao375 microduck-replica feetech_bam.py.
+    """
 
     def initialize(self, mj_model, model, data, device) -> None:
         super().initialize(mj_model, model, data, device)
         # kp_scale is (num_envs, 1); mirror it for a per-env friction multiplier.
         self.friction_scale = torch.ones_like(self.kp_scale)
         self.default_friction_scale = self.friction_scale.clone()
+        self._smooth_target = type(self._bam_model.actuator).__name__ == "STS3215Actuator"
+        if self._smooth_target:
+            self._bam_model.actuator.q_target_smooth = torch.zeros_like(self._prev_motor_torque)
+            self._goal_reset_pending = torch.ones_like(self.kp_scale, dtype=torch.bool)
+
+    def reset(self, env_ids=None) -> None:
+        super().reset(env_ids)
+        if getattr(self, "_smooth_target", False):
+            if env_ids is None:
+                self._goal_reset_pending.fill_(True)
+            else:
+                self._goal_reset_pending[env_ids] = True
+
+    def compute(self, cmd: ActuatorCmd) -> torch.Tensor:
+        if getattr(self, "_smooth_target", False):
+            act = self._bam_model.actuator
+            act.q_target_smooth = torch.where(self._goal_reset_pending, cmd.pos, act.q_target_smooth)
+            self._goal_reset_pending.zero_()
+        return super().compute(cmd)
 
     def _compute_friction_budget(
         self,

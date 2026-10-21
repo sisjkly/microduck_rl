@@ -9,6 +9,7 @@ from mjlab_microduck.actuator import (
 )
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.spec_config import CollisionCfg
+from mjlab_microduck.robot.mass_profile import active_profile_name, apply_mass_profile
 
 
 _ROBOT_DIR: Path = Path(os.path.dirname(__file__)) / "microduck"
@@ -46,22 +47,28 @@ assert MICRODUCK_GROUNDCONTACT_ROLLERS_BACKLASH_XML.exists(), f"XML not found: {
 assert MICRODUCK_ALLCOLLISIONS_BACKLASH_XML.exists(), f"XML not found: {MICRODUCK_ALLCOLLISIONS_BACKLASH_XML}"
 
 
+def _robot_spec(path: Path) -> mujoco.MjSpec:
+    """Load a robot MJCF and apply this build's mass profile (see mass_profile.py;
+    MICRODUCK_MASS_PROFILE=official restores the exported official masses)."""
+    return apply_mass_profile(mujoco.MjSpec.from_file(str(path)), active_profile_name())
+
+
 def get_walk_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(MICRODUCK_WALK_XML))
+    return _robot_spec(MICRODUCK_WALK_XML)
 
 
 def get_standup_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(MICRODUCK_GROUNDCONTACT_XML))
+    return _robot_spec(MICRODUCK_GROUNDCONTACT_XML)
 
 
 def get_ground_pick_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(MICRODUCK_GROUNDCONTACT_XML))
+    return _robot_spec(MICRODUCK_GROUNDCONTACT_XML)
 
 
 def get_walk_rollers_spec() -> mujoco.MjSpec:
     # NOTE: was loading robot_groundcontact.xml (no wheels) — the roller env
     # silently ran on the wheel-less standup model.
-    return mujoco.MjSpec.from_file(str(MICRODUCK_GROUNDCONTACT_ROLLERS_XML))
+    return _robot_spec(MICRODUCK_GROUNDCONTACT_ROLLERS_XML)
 
 
 SERVO_MESH_NAME = "xl330"
@@ -90,11 +97,11 @@ def name_servo_collision_geoms(spec: mujoco.MjSpec) -> mujoco.MjSpec:
 
 
 def get_allcollisions_spec() -> mujoco.MjSpec:
-    return name_servo_collision_geoms(mujoco.MjSpec.from_file(str(MICRODUCK_ALLCOLLISIONS_XML)))
+    return name_servo_collision_geoms(_robot_spec(MICRODUCK_ALLCOLLISIONS_XML))
 
 
 def get_allcollisions_backlash_spec() -> mujoco.MjSpec:
-    return name_servo_collision_geoms(mujoco.MjSpec.from_file(str(MICRODUCK_ALLCOLLISIONS_BACKLASH_XML)))
+    return name_servo_collision_geoms(_robot_spec(MICRODUCK_ALLCOLLISIONS_BACKLASH_XML))
 
 
 def get_ball_spec() -> mujoco.MjSpec:
@@ -102,15 +109,15 @@ def get_ball_spec() -> mujoco.MjSpec:
 
 
 def get_backlash_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(MICRODUCK_GROUNDCONTACT_BACKLASH_XML))
+    return _robot_spec(MICRODUCK_GROUNDCONTACT_BACKLASH_XML)
 
 
 def get_walk_backlash_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(MICRODUCK_WALK_BACKLASH_XML))
+    return _robot_spec(MICRODUCK_WALK_BACKLASH_XML)
 
 
 def get_rollers_backlash_spec() -> mujoco.MjSpec:
-    return mujoco.MjSpec.from_file(str(MICRODUCK_GROUNDCONTACT_ROLLERS_BACKLASH_XML))
+    return _robot_spec(MICRODUCK_GROUNDCONTACT_ROLLERS_BACKLASH_XML)
 
 
 HOME_FRAME = EntityCfg.InitialStateCfg(
@@ -173,13 +180,38 @@ _BAM_ACTUATOR_KWARGS = dict(
     delay_min_lag=3,
     delay_max_lag=6,
 )
-actuators = FrictionDRBamActuatorCfg(**_BAM_ACTUATOR_KWARGS)
+
+# -- Feetech HD1910 (our clone; same servos as kissqy/Microduck-kissqy) --
+# BAM M6 fit (STS3215 control law: duty = (q_smooth - q) * P * 0.166 * 1.32),
+# params from kissqy's training console (fit by fanhao375/microduck-replica).
+# Firmware P = 5 is what kissqy's robotd writes to the servos and trains with:
+# ~1.03 N.m/rad effective stiffness at 7.4 V, i.e. ~2x a kp_fw=200 XL330, with a
+# similar ~0.9-1.0 N.m stall and much larger friction. 2S pack range 7.4-8.0 V.
+_HD1910_JSON = str(Path(__file__).resolve().parents[1] / "actuator" / "params" / "hd1910_m6.json")
+_HD1910_ACTUATOR_KWARGS = dict(
+    json_path=_HD1910_JSON,
+    target_names_expr=(r"^(?!passive_).*",),
+    kp_fw=5.0,
+    vin_range=(7.4, 8.0),
+    vin_drop_gain_range=(0.0, 0.2),
+    vin_min=7.0,
+    delay_min_lag=3,
+    delay_max_lag=6,
+)
+
+# Which servo model every task trains against. Env var wins (A/B, CPU tools);
+# official policies were trained with "xl330".
+SERVO_MODEL = os.environ.get("MICRODUCK_SERVO", "hd1910")
+if SERVO_MODEL not in ("xl330", "hd1910"):
+    raise ValueError(f"MICRODUCK_SERVO={SERVO_MODEL!r}: expected xl330 | hd1910")
+_ACTIVE_ACTUATOR_KWARGS = _HD1910_ACTUATOR_KWARGS if SERVO_MODEL == "hd1910" else _BAM_ACTUATOR_KWARGS
+actuators = FrictionDRBamActuatorCfg(**_ACTIVE_ACTUATOR_KWARGS)
 
 # Same BAM actuator, but the firmware position loop reads the encoder THROUGH
 # the passive_<joint>_backlash hinges (the real encoder is on the output side
 # of the gear play). Only for the backlash model; the target regex already
 # excludes the passive_* backlash joints from actuation.
-backlash_actuators = BacklashEncoderBamActuatorCfg(**_BAM_ACTUATOR_KWARGS)
+backlash_actuators = BacklashEncoderBamActuatorCfg(**_ACTIVE_ACTUATOR_KWARGS)
 
 # -- BAM M4 actuator
 # actuators = DelayedActuatorCfg(
