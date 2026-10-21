@@ -321,12 +321,15 @@ def cmd_direction(args):
     for k, j in enumerate(cal.joints):
         if not j.id or (args.joints and j.name not in args.joints.split(",")):
             continue
-        input(f"\n[{j.name} / ID {j.id}] 正方向 = {POSITIVE[j.name]}\n  回到零位附近，按回车后在 3 秒内把这个关节往正方向慢慢转 20-30 度…")
+        input(f"\n[{j.name} / ID {j.id}] 正方向 = {POSITIVE[j.name]}\n  回到零位附近，按回车后在 3 秒内把这个关节往正方向转 10 度以上（髋横滚活动范围小，10 度即可）…")
         q0 = io.read().positions[k]
-        time.sleep(3.0)
-        q1 = io.read().positions[k]
-        d = math.degrees(q1 - q0)
-        if abs(d) < 5:
+        # Largest excursion over 3 s, so springing back or releasing early does not hide it.
+        t_end, d = time.monotonic() + 3.0, 0.0
+        while time.monotonic() < t_end:
+            e = math.degrees(io.read().positions[k] - q0)
+            d = e if abs(e) > abs(d) else d
+            time.sleep(0.03)
+        if abs(d) < 4:
             print(f"  只动了 {d:+.1f} deg，跳过（重做: --joints {j.name}）")
             continue
         if d > 0:
