@@ -277,8 +277,11 @@ def cmd_live(args):
     try:
         while True:
             s = io.read()
-            rows = [f"{n:16s} {math.degrees(q):+7.1f} deg  (HOME {math.degrees(h):+6.1f}, d {math.degrees(q - h):+6.1f})"
-                    for n, q, h in zip(JOINT_NAMES, s.positions, DEFAULT_POSITION)]
+            diag = getattr(io, "diag", {})  # bridge: raw HD1910 counts, to debug calibration
+            rows = [f"{j.name:16s} {math.degrees(q):+7.1f} deg  (HOME {math.degrees(h):+6.1f}, d {math.degrees(q - h):+6.1f})"
+                    + (f"  raw {diag[j.id]['raw']:5d} zero {j.zero_raw:4d} dir {j.direction:+d}"
+                       f"{' ERR 0x%02x' % diag[j.id]['error'] if diag[j.id]['error'] else ''}" if j.id in diag else "")
+                    for j, q, h in zip(io.cal.joints, s.positions, DEFAULT_POSITION)]
             g = s.imu.gravity
             tilt = math.degrees(math.acos(max(-1.0, min(1.0, -g[2]))))
             print("\033[2J\033[H" + "\n".join(rows))
