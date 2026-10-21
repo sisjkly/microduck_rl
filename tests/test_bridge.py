@@ -468,3 +468,19 @@ def test_hip_roll_spread_moves_both_legs_outward_for_the_same_command():
     dr = old.joints[RIGHT_HIP_ROLL].to_rad(cal.joints[RIGHT_HIP_ROLL].to_raw(q[RIGHT_HIP_ROLL])) - q[RIGHT_HIP_ROLL]
     assert dl == pytest.approx(+s, abs=2 * math.pi / 4096)   # left + = outward
     assert dr == pytest.approx(-s, abs=2 * math.pi / 4096)   # right - = outward
+
+
+def test_imu_snap_recovers_square_mount_and_sign_of_residual():
+    from duck_runtime.imu import DEFAULT_MOUNT, SflpDecoder, encode_block
+    from duck_runtime.tools import nearest_axis_mount
+    true_mount = np.array(DEFAULT_MOUNT)
+    tilt = np.array([math.cos(math.radians(1.5)), 0.0, math.sin(math.radians(1.5)), 0.0])  # +3 deg about y
+    measured = quat_mul(tilt, true_mount)
+    q0, dev = nearest_axis_mount(measured)
+    assert abs(abs(np.dot(q0, true_mount)) - 1) < 1e-9
+    assert np.degrees(dev[1]) == pytest.approx(3.0, abs=1e-6)
+    # with the measured mount an upright trunk reads nose-UP by that residual (pitch = asin(g_x) < 0)
+    dec = SflpDecoder(measured)
+    for _ in range(30):
+        g = dec.decode(encode_block([0, 0, 0], quat_mul(np.array([1.0, 0, 0, 0]), true_mount))).gravity
+    assert math.degrees(math.asin(g[0])) == pytest.approx(-3.0, abs=0.2)

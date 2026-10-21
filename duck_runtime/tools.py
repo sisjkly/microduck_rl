@@ -15,6 +15,7 @@ This robot (default ``--backend bridge``): servos behind the ESP32-S3 MDK2 bridg
   python -m duck_runtime.tools home-test --calib calib.json        # TORQUE: ease to HOME
   python -m duck_runtime.tools trim      --calib calib.json        # TORQUE, standing: hip-pitch trim
   python -m duck_runtime.tools hip-roll  --calib calib.json        # TORQUE, standing: hip-roll preload sweep
+  python -m duck_runtime.tools imu-snap  --calib calib.json        # square IMU board: snap mount to axis-aligned
 
 Order on a new robot: template -> scan -> zero -> direction -> imu-mount -> live (check) ->
 home-test (robot hanging) -> run.
@@ -429,6 +430,55 @@ def cmd_imu_mount(args):
     io.close()
 
 
+def nearest_axis_mount(q) -> tuple[np.ndarray, np.ndarray]:
+    """Closest of the 24 axis-aligned sensor->trunk rotations, and the measured mount's
+    deviation from it as a trunk-frame rotation vector (rad: about x, y, z)."""
+    import itertools
+    from .imu import quat_mul
+    q = np.asarray(q, dtype=float) / np.linalg.norm(q)
+    best = None
+    for perm in itertools.permutations(range(3)):
+        for signs in itertools.product((1, -1), repeat=3):
+            M = np.zeros((3, 3))
+            for i, (k, sgn) in enumerate(zip(perm, signs)):
+                M[i, k] = sgn
+            if np.linalg.det(M) < 0:
+                continue
+            c = _mat2quat(M)
+            if best is None or abs(np.dot(c, q)) > abs(np.dot(best, q)):
+                best = c
+    if np.dot(best, q) < 0:
+        q = -q
+    dev = quat_mul(q, best * np.array([1, -1, -1, -1]))
+    dev = dev if dev[0] >= 0 else -dev
+    n = float(np.linalg.norm(dev[1:]))
+    return best, (2 * math.atan2(n, dev[0]) / n * dev[1:]) if n > 1e-12 else np.zeros(3)
+
+
+def cmd_imu_snap(args):
+    """If the IMU board is screwed square to the trunk (like the official board), its true
+    mount is axis-aligned and the two-pose measurement's small residual is posing error.
+    Snap imu_mount to the nearest axis-aligned rotation."""
+    cal = Calibration.load(args.calib)
+    q0, dev = nearest_axis_mount(cal.imu_mount)
+    d = np.degrees(dev)
+    print(f"measured imu_mount {np.round(cal.imu_mount, 4).tolist()}")
+    print(f"nearest axis-aligned {np.round(q0, 4).tolist()}; residual roll {d[0]:+.2f}  pitch {d[1]:+.2f}  yaw {d[2]:+.2f} deg")
+    from .imu import SflpDecoder, encode_block
+    dec = SflpDecoder(cal.imu_mount)  # what an upright trunk reads with the measured mount
+    for _ in range(SflpDecoder.READY_SAMPLES + 3):
+        g = dec.decode(encode_block([0, 0, 0], q0)).gravity
+    print(f"(a square board on an upright trunk would currently read pitch {math.degrees(math.asin(g[0])):+.1f} deg "
+          f"(+ = nose down), roll {math.degrees(math.asin(g[1])):+.1f} deg instead of 0/0)")
+    if np.linalg.norm(d) > 10:
+        raise SystemExit("residual > 10 deg: the board is not square to the trunk (or the measurement is off); not snapping")
+    if input("IMU 板是方正地固定在躯干上的吗？输入 y 回车改用方正安装姿态：").strip().lower() == "y":
+        cal.imu_mount = [float(v) for v in q0]
+        cal.imu_mount_verified = True
+        cal.save(args.calib)
+        print(f"saved {args.calib}. 接着跑 trim（髋俯仰）让 HOME 站姿重新对上。")
+
+
 def cmd_home_test(args):
     """TORQUE ON. Robot hanging, feet off the ground: ease to HOME over 3 s, hold, report error."""
     from .safety import Safety
@@ -639,7 +689,7 @@ def main(argv=None):
     for name, fn in [("scan", cmd_scan), ("relax", cmd_relax), ("step-test", cmd_step_test),
                      ("live", cmd_live), ("zero", cmd_zero),
                      ("direction", cmd_direction), ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test),
-                     ("trim", cmd_trim), ("hip-roll", cmd_hip_roll)]:
+                     ("trim", cmd_trim), ("hip-roll", cmd_hip_roll), ("imu-snap", cmd_imu_snap)]:
         p = sub.add_parser(name)
         add_robot_args(p)
         if name not in ("scan", "relax", "step-test"):
