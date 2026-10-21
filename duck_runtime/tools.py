@@ -7,6 +7,7 @@ This robot (default ``--backend bridge``): servos behind the ESP32-S3 MDK2 bridg
   python -m duck_runtime.tools template  calib.json                # start a calibration file
   python -m duck_runtime.tools scan                                # bridge, 14 servos, IMU
   python -m duck_runtime.tools relax                               # torque off + clear bridge fault
+  python -m duck_runtime.tools step-test --id 13                   # TORQUE, one servo: step response
   python -m duck_runtime.tools zero      --calib calib.json        # record zero_raw
   python -m duck_runtime.tools direction --calib calib.json        # verify signs
   python -m duck_runtime.tools imu-mount --calib calib.json        # two-pose IMU mount
@@ -205,6 +206,71 @@ def cmd_relax(args):
         b.close()
 
 
+# step-test reference numbers come from SimIO (BAM HD1910, P=5 D=0, no extra delay), robot
+# standing at HOME, +150 counts on one joint.
+def cmd_step_test(args):
+    """TORQUE ON ONE SERVO (default ID 13 head_yaw), every other joint limp: support the robot
+    or lay it on its back. P/D 5/0 like training, hold 0.5 s, step +N counts, log 1 s."""
+    if args.backend != "bridge":
+        raise SystemExit("step-test is for the bridge backend")
+    from .bridge import ADDR_DIAG, BRIDGE_IDS, Bridge, parse_diag
+    i, n = args.id, args.counts
+    b = Bridge(_port(args))
+    regs = b.native(i, 41, 9)
+    pd0 = b.native(i, 50, 2)
+    print(f"ID {i}: acc {regs[0]}  44-45 {struct.unpack_from('<H', regs, 3)[0]}  46-47 {struct.unpack_from('<H', regs, 5)[0]}"
+          f"  torque limit(48) {struct.unpack_from('<H', regs, 7)[0]}  RAM P/D {pd0[0]}/{pd0[1]}")
+    input(f"只给 ID {i} 上力矩（P=5 D=0），其他关节无力：先扶好/放倒机器人。回车开始…")
+    st = b.status()
+    if st["fault"]:
+        b.close()
+        raise SystemExit(f"bridge fault {st['fault']} ({st['fault_name']}): run tools relax first")
+
+    def diag():
+        return parse_diag(b.read(i, ADDR_DIAG, 32))
+
+    try:
+        b.npd(i, 5, 0)
+        t_end = time.monotonic() + 0.5
+        while b.native(i, 50, 2) != bytes([5, 0]):
+            if time.monotonic() > t_end:
+                raise SystemExit("P/D readback failed")
+        d = diag()
+        dx = lambda ft: 2048 + d["direction"] * (ft - d["center"])  # noqa: E731
+        start = d["raw"]
+        b.sync_write(116, 4, {i: struct.pack("<i", dx(start))})
+        b.torque([i], True)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 0.5:
+            diag()
+            time.sleep(0.005)
+        hold = diag()["raw"]
+        b.sync_write(116, 4, {i: struct.pack("<i", dx(start + n))})
+        t0 = time.monotonic()
+        log = []
+        while time.monotonic() - t0 < 1.0:
+            log.append((time.monotonic() - t0, diag()["raw"]))
+            time.sleep(0.002)  # the bridge refreshes feedback every ~6-10 ms anyway
+    finally:
+        b.torque(BRIDGE_IDS, False)
+        time.sleep(0.05)
+        try:
+            b.npd(i, pd0[0], pd0[1])
+        finally:
+            b.close()
+    t = np.array([x[0] for x in log])
+    frac = (np.array([x[1] for x in log]) - hold) / n
+    def first(level):
+        k = np.nonzero(frac >= level)[0]
+        return f"{t[k[0]] * 1000:.0f} ms" if k.size else "never"
+    print(f"hold drift {hold - start:+d} cnt; step +{n} cnt: t50 {first(0.5)}  t90 {first(0.9)}  "
+          f"final {frac[-1]:.2f}  peak {frac.max():.2f}  ({len(log)} samples)")
+    for ms in (20, 40, 60, 80, 100, 150, 200, 300, 500, 800):
+        k = min(np.searchsorted(t, ms / 1000), len(t) - 1)
+        print(f"  {ms:4d} ms  {frac[k]:5.2f}")
+    print("sim (BAM HD1910 P=5, 150 cnt): head_yaw t50 80 ms, head_pitch t50 75 / t90 150 ms, left_knee t50 100 / t90 380 ms")
+
+
 def cmd_live(args):
     io = _io(args)
     io.set_torque(False)
@@ -384,12 +450,16 @@ def main(argv=None):
     p.add_argument("out")
     p.add_argument("--layout", choices=["bridge", "official"], default="bridge")
     p.set_defaults(fn=cmd_template)
-    for name, fn in [("scan", cmd_scan), ("relax", cmd_relax), ("live", cmd_live), ("zero", cmd_zero),
+    for name, fn in [("scan", cmd_scan), ("relax", cmd_relax), ("step-test", cmd_step_test),
+                     ("live", cmd_live), ("zero", cmd_zero),
                      ("direction", cmd_direction), ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test)]:
         p = sub.add_parser(name)
         add_robot_args(p)
-        if name not in ("scan", "relax"):
+        if name not in ("scan", "relax", "step-test"):
             p.add_argument("--calib", required=True)
+        if name == "step-test":
+            p.add_argument("--id", type=int, default=13, help="bridge ID (13 = head_yaw)")
+            p.add_argument("--counts", type=int, default=150, help="step size in encoder counts (150 = 13 deg)")
         if name in ("zero", "direction"):
             p.add_argument("--joints", default="", help="comma-separated subset")
         p.set_defaults(fn=fn)
