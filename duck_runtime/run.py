@@ -66,8 +66,6 @@ def main(argv=None):
                     "(sit/stand, ground pick, kicks, roulade)")
     ap.add_argument("--rise-s", type=float, default=None,
                     help="with --set: seconds the sit/stand network drives the rise (manifest: 1.0)")
-    ap.add_argument("--no-rise-gate", action="store_true",
-                    help="hand the rise to the gait on the timer alone (robotd), not after the trunk settles")
     ap.add_argument("--sitstand", help="with --set: another sit/stand network (twist vx = sit flag), "
                     "e.g. the got-a-talent reference")
     ap.add_argument("--tuning", choices=["official", "trained"], default="official",
@@ -125,7 +123,7 @@ def main(argv=None):
         ap.error("--policy or --set is required")
     runner = Runner(io, Controller(walk, tuning), safety,
                     on_fall="keep" if args.keep_on_fall else "limp", log=log, head_offset=head,
-                    policies=pset, rise_settle_tilt_deg=None if args.no_rise_gate else 6.0)
+                    policies=pset)
     viewer = None
     if args.viewer and args.backend == "sim" and os.environ.get("DISPLAY"):
         import mujoco.viewer
