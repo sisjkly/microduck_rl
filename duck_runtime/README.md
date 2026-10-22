@@ -45,25 +45,29 @@ alias duck='~/microduck/.venv/bin/python -m'
 sudo systemctl stop microduck-gamepad.service     # 它会占用 /dev/ttyACM0；想开机不自启再 disable
 ```
 
-### 2. 上机流程（按顺序，一次只验证一件事）
+### 2. 上机流程（按顺序，一次只验证一件事；本机 2026-10-22 走通的版本）
 
 ```bash
 duck duck_runtime.tools scan                          # 14 个舵机 ok、mode 4、NPD1 yes；IMU SFLP ≈120 Hz
-duck duck_runtime.tools template calib.json           # 本机 ID 的标定模板
-duck duck_runtime.tools zero      --calib calib.json  # 零位：腿伸直并拢、脚放平、脖子和头摆正
-duck duck_runtime.tools direction --calib calib.json  # 逐关节按提示往正方向掰，自动修正符号
-duck duck_runtime.tools imu-mount --calib calib.json  # 直立 + 前倾两个姿态
-duck duck_runtime.tools live      --calib calib.json  # 检查：零位附近读数≈0，直立 gravity≈[0,0,-1]
+duck duck_runtime.tools template calib.json           # 本机 ID 的标定模板（14 个关节方向都是 -1）
+duck duck_runtime.tools zero      --calib calib.json  # 零位：用打印的零位架子（腿竖直、脚平、脖子竖直、头平）
+duck duck_runtime.tools imu-mount --calib calib.json  # 姿态1 架子平放、姿态2 连架子前倾 30-60°（或 imu-snap）
+duck duck_runtime.tools sign-test --calib calib.json  # 平地站：IMU 判膝/髋偏航方向，两项都应 RIGHT
 duck duck_runtime.tools home-test --calib calib.json  # 吊起，上力矩 3 s 回 HOME，看每个关节误差
-duck duck_runtime.tools trim      --calib calib.json  # 平地站 HOME，按 IMU 修髋俯仰零位（跑两次）
-duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0.7 --log first.npz
+duck duck_runtime.tools trim      --calib calib.json  # 平地站 HOME，按 IMU 修髋俯仰零位（跑到 <0.7°）
+duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0.7 --log walk.npz
 #   键：1 上力矩回 HOME → 2 启动策略 → w/s a/d 给指令；3 停止回 HOME；0 卸力；Ctrl+C 退出
 ```
 
-- 标定的坑（本机实测）：一次一条命令，别整段粘贴（后面的行会被当成回车吃掉）；
-  **零位时脖子竖直 = 两个俯仰舵机转轴连线竖直**，HOME 时脖子还要再后仰 20°——
-  若零位时就把脖子推到了后限位，策略起步时脖子会顶死；腿零位要躯干水平（zero 会打印躯干俯仰），
-  最后用 `trim` 让 HOME 站姿俯仰对上训练值（+2.5°），否则会一直往后退。
+- 结果（walk7，2026-10-22）：连续行走 67 s 不倒；vx 0.2 直走偏航 +0.4°/s；
+  wz +0.8 实际 +27.7°/s（约 60%，与 mjlab 仿真的跟踪比例一致）；动作 p99 0.74（仿真步态约 0.7）。
+- 标定的坑（本机实测，每条都花过时间）：
+  - **零位用架子**。手扶标出来的脖子零位偏了 24°（以为竖直其实已后仰），HOME 时头比官方靠后，
+    整机重心偏后 → 一迈步就往后退；腿零位手扶也会把躯干倾斜算进髋零位。架子标完 14 个舵机都在 2048±140 内。
+  - **方向别靠人眼**。`direction`（人掰关节）和 `pose-check`（看机器人动）的人眼判断两次与 IMU 相反；
+    HOME 下接近 0 的膝、髋偏航、头偏航/横滚最容易错，用 `sign-test`（IMU 判）定。本机 14 个都是 -1
+    （HD1910 与 XL330 转向相反，-1 正是这个补偿）。
+  - 一次一条命令，别整段粘贴（后面的行会被当成回车吃掉）；`--head-cmd=-10,...` 负数要用等号。
 - `scan` 里如果某个舵机 `acc/time/speed` 非 0（`<-- move limit set`）先告诉我：桥只写目标位置，
   这几个寄存器里的旧值会限制每次运动，和训练假设不一致。
 - 断力矩时关节若掰不动（减速比大），零位可用鸭子上已有的
