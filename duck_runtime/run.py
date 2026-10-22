@@ -6,9 +6,13 @@
   sudo systemctl stop microduck-gamepad.service
   python -m duck_runtime.run --calib calib.json --policy velstand.onnx
 
+  # the official set (sit/stand, ground pick, kicks, roulade): the Hub repo in policies/
+  python -m duck_runtime.run --calib calib.json --set policies
+
 Keys:  1 enable (torque on, ease to HOME)   2 start policy   3 stop (back to HOME)
        0 limp (torque off)                  w/s vx +-0.05    z/c vy +-0.05
        a/d yaw +-0.2                        space zero command
+  with --set:  x sit / stand    g ground pick    k / l kick left / right    r roulade
        Ctrl+C: limp and exit.  The policy needs >= ~0.2 m/s to start stepping.
 """
 
@@ -57,7 +61,11 @@ class Keys:
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--backend", choices=["bridge", "feetech", "sim"], default="bridge")
-    ap.add_argument("--policy", required=True, help="61->14 ONNX (e.g. official velstand.onnx)")
+    ap.add_argument("--policy", help="61->14 ONNX gait (e.g. official velstand.onnx); with --set: overrides its walk slot")
+    ap.add_argument("--set", dest="policy_set", help="directory with the official set's manifest.json + .onnx "
+                    "(sit/stand, ground pick, kicks, roulade)")
+    ap.add_argument("--sitstand", help="with --set: another sit/stand network (twist vx = sit flag), "
+                    "e.g. the got-a-talent reference")
     ap.add_argument("--tuning", choices=["official", "trained"], default="official",
                     help="official: scale 0.9 + low-pass 0.5/0.7 (robotd defaults); trained: 1.0, no filter")
     ap.add_argument("--action-scale", type=float, default=None, help="override, e.g. 0.7 for a timid first run")
@@ -96,8 +104,22 @@ def main(argv=None):
     head = tuple(math.radians(float(v)) for v in args.head_cmd.split(","))
     if len(head) != 4:
         ap.error("--head-cmd needs 4 values")
-    runner = Runner(io, Controller(Policy(args.policy), tuning), safety,
-                    on_fall="keep" if args.keep_on_fall else "limp", log=log, head_offset=head)
+    pset, skill_keys = None, {}
+    if args.policy_set:
+        from .policy_set import bind_keys, load_set
+        pset = load_set(args.policy_set, walk=args.policy, sitstand=args.sitstand)
+        skill_keys = bind_keys(pset.skills)
+        walk = pset.walk
+        print(f"policy set {args.policy_set}: walk {pset.walk_file}, sit/stand "
+              f"{'x' if pset.sitstand else '-'}, skills "
+              + (", ".join(f"{k}={n} ({pset.skills[n].duration_s:.1f} s)" for k, n in skill_keys.items()) or "-"))
+    elif args.policy:
+        walk = Policy(args.policy)
+    else:
+        ap.error("--policy or --set is required")
+    runner = Runner(io, Controller(walk, tuning), safety,
+                    on_fall="keep" if args.keep_on_fall else "limp", log=log, head_offset=head,
+                    policies=pset)
     viewer = None
     if args.viewer and args.backend == "sim" and os.environ.get("DISPLAY"):
         import mujoco.viewer
@@ -131,6 +153,13 @@ def main(argv=None):
                     elif k == "a": wz = min(WZ_MAX, wz + 0.2)
                     elif k == "d": wz = max(-WZ_MAX, wz - 0.2)
                     elif k == " ": vx = vy = wz = 0.0
+                    elif k == "x" and pset is not None:
+                        why = runner.sit_toggle()
+                        print(f"\n[{'sit/stand' if why is None else 'refused'}] {why or runner.sit}")
+                    elif k in skill_keys:
+                        vx = vy = wz = 0.0           # a move starts from standing; walk resumes at zero
+                        why = runner.trigger(skill_keys[k])
+                        print(f"\n[{'skill' if why is None else 'refused'}] {why or skill_keys[k]}")
                 runner.set_command(Command(twist=(vx, vy, wz), head=head), io.now())
                 runner.tick()
                 if viewer is not None:
@@ -138,7 +167,7 @@ def main(argv=None):
                 now = time.monotonic()
                 if now - last_print > 0.5:
                     last_print = now
-                    print(f"\r[{runner.state.value:4s}] cmd vx {vx:+.2f} vy {vy:+.2f} wz {wz:+.2f}  "
+                    print(f"\r[{runner.state.value:4s} {runner.mode:10s}] cmd vx {vx:+.2f} vy {vy:+.2f} wz {wz:+.2f}  "
                           f"falls {runner.fall_events}  {runner.refusal}   ", end="", flush=True)
                 if args.backend == "sim":  # real time for a human at the keyboard
                     time.sleep(max(0.0, io.control_dt - (time.monotonic() - t0)))
@@ -153,7 +182,8 @@ def main(argv=None):
                                 targets=np.array([np.full(15, np.nan) if r.targets is None else r.targets for r in log]),
                                 positions=np.array([r.positions for r in log]),
                                 gravity=np.array([r.gravity for r in log]), gyro=np.array([r.gyro for r in log]),
-                                currents=np.array([np.full(15, np.nan) if r.currents is None else r.currents for r in log]))
+                                currents=np.array([np.full(15, np.nan) if r.currents is None else r.currents for r in log]),
+                                mode=[r.mode for r in log])
             print(f"\nlog -> {args.log}")
 
 

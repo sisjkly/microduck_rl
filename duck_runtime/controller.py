@@ -1,8 +1,9 @@
 """Sensors + command -> joint targets, with the official runtime's tuning semantics.
 
-Mirrors robotd/src/control.rs:654-735 (pollen-robotics/microduck 942e58e) for the walk
-net, which is the only net here (``velstand.onnx`` stands still at zero command, so no
-separate stand network):
+Mirrors robotd/src/control.rs:654-735 (pollen-robotics/microduck 942e58e). The walk net
+(``velstand.onnx`` stands still at zero command, so no separate stand network) is the
+default; the runner passes another network of the set (sit/stand, ground pick, one-shots,
+``policy_set.py``) per tick:
 
     obs      <- Observation::build(imu, q, qdot, DEFAULT_POSITION, last_action, cmd)
     action   <- ONNX                         (last_action = raw action, before scaling)
@@ -104,13 +105,17 @@ class Controller:
             self._delayed_velocity(sensors.velocities), self.last_action, command.block(),
         )
 
-    def step(self, sensors: Sensors, command: Command) -> np.ndarray:
+    def step(self, sensors: Sensors, command: Command, policy: Policy | None = None,
+             action_scale: float | None = None) -> np.ndarray:
+        """``policy`` / ``action_scale`` select another network of the set for this tick
+        (control.rs: last_action and the low-pass are shared across every network)."""
         obs = self.observe(sensors, command)
         self.last_obs = obs
-        action = self.policy(obs)
+        action = (policy or self.policy)(obs)
         self.last_action = action
 
-        targets = DEFAULT_POSITION + self.tuning.action_scale * scatter_action(action)
+        scale = self.tuning.action_scale if action_scale is None else action_scale
+        targets = DEFAULT_POSITION + scale * scatter_action(action)
         targets[MOUTH_INDEX] = MOUTH_CLOSED
         prev = self.previous_targets
         if prev is not None:

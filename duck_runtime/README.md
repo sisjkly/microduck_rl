@@ -80,6 +80,31 @@ duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0
 - 摇杆量给到 **0.2–0.3** 才会迈步（策略本身的特性，仿真和 mjlab 一致）。
 - 跌倒（倾斜 >60° 持续 200 ms）默认立即卸力；`--keep-on-fall` 改成继续驱动（官方默认行为）。
 
+### 3. 官方策略集（坐下/站起、捡东西、踢球、翻滚）
+
+`--set` 读官方 Hub 仓库 `pollen-robotics/microduck-policies` 的 `manifest.json`（schema 2），
+逐项照官方 robotd（`control.rs:421-760`）调度，逻辑在 `policy_set.py` + `runner.py`：
+
+| 键 | 动作 | 网络 | 指令 | 时长 | 动作幅度 |
+|---|---|---|---|---|---|
+| `x` | 坐下 / 站起 | alpha_sitstand | vx 槽=1 坐、0 站，头指令照常 | 坐稳 2 s 后才能站，站起 1 s | 1.0 |
+| `g` | 捡东西 | alpha_ground_pick | [cos 2πφ, sin 2πφ, 0]，周期 4 s | 2.8 s | 1.0 |
+| `k` / `l` | 左 / 右踢 | ball_kick_* | 全零 | 0.5 s | 跟步态（0.9） |
+| `r` | 翻滚 | roulade | 全零 | 1.0 s | 跟步态 |
+
+- 一次只做一个动作，坐着时不能做其它动作；动作结束回到步态，指令归零。
+- 动作进行中或坐着时不因"跌倒"卸力（官方同样：翻滚本来就是倒过来的）。
+- 没做的：每个动作的舵机增益比例（P 固定 5，NPD1 只能断力矩时改）、按住连续翻滚、轮滑（roller）相关的策略。
+- `--policy X.onnx` 替换步态（如 Arena 的 sprint / hill-climb 参考策略），`--sitstand X.onnx` 替换坐站网络（如 got-a-talent）。
+- 日志多了 `mode` 字段（walk / sit / rise / 技能名）。
+
+```bash
+mkdir -p ~/microduck_rl/policies && cd ~/microduck_rl/policies
+for f in manifest.json velstand.onnx alpha_sitstand.onnx alpha_ground_pick.onnx ball_kick_left.onnx ball_kick_right.onnx roulade.onnx; do curl -fLO https://huggingface.co/pollen-robotics/microduck-policies/resolve/main/$f; done
+cd ~/microduck_rl
+duck duck_runtime.run --calib calib.json --set policies --log set1.npz
+```
+
 ## 先在电脑上预演
 
 ```bash
