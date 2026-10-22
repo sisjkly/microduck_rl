@@ -98,6 +98,9 @@ duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0
 | `r` | 翻滚 | roulade | 全零 | 1.0 s | 跟步态 |
 
 - 一次只做一个动作，坐着时不能做其它动作；动作结束回到步态，指令归零。
+- **和官方不同的一处**：站起满 1 s 后，躯干倾斜 ≤6° 且俯仰/横滚角速度 ≤30°/s 才交给步态（最多再等 2 s）。
+  set1.npz：4 次站起里有 1 次到 1 s 时还在往后晃（-9°），步态接手后猛往前扑倒。
+  `--rise-s 1.5` 改站起时长，`--no-rise-gate` 恢复官方的纯定时。
 - 动作进行中或坐着时不因"跌倒"卸力（官方同样：翻滚本来就是倒过来的）。
 - 没做的：每个动作的舵机增益比例（P 固定 5，NPD1 只能断力矩时改）、按住连续翻滚、轮滑（roller）相关的策略。
 - `--policy X.onnx` 替换步态（如 Arena 的 sprint / hill-climb 参考策略），`--sitstand X.onnx` 替换坐站网络（如 got-a-talent）。

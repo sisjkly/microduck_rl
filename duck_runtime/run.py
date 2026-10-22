@@ -64,6 +64,10 @@ def main(argv=None):
     ap.add_argument("--policy", help="61->14 ONNX gait (e.g. official velstand.onnx); with --set: overrides its walk slot")
     ap.add_argument("--set", dest="policy_set", help="directory with the official set's manifest.json + .onnx "
                     "(sit/stand, ground pick, kicks, roulade)")
+    ap.add_argument("--rise-s", type=float, default=None,
+                    help="with --set: seconds the sit/stand network drives the rise (manifest: 1.0)")
+    ap.add_argument("--no-rise-gate", action="store_true",
+                    help="hand the rise to the gait on the timer alone (robotd), not after the trunk settles")
     ap.add_argument("--sitstand", help="with --set: another sit/stand network (twist vx = sit flag), "
                     "e.g. the got-a-talent reference")
     ap.add_argument("--tuning", choices=["official", "trained"], default="official",
@@ -109,6 +113,8 @@ def main(argv=None):
         from .policy_set import bind_keys, load_set
         pset = load_set(args.policy_set, walk=args.policy, sitstand=args.sitstand)
         skill_keys = bind_keys(pset.skills)
+        if args.rise_s is not None and pset.sitstand is not None:
+            pset.sitstand.rise_s = args.rise_s
         walk = pset.walk
         print(f"policy set {args.policy_set}: walk {pset.walk_file}, sit/stand "
               f"{'x' if pset.sitstand else '-'}, skills "
@@ -119,7 +125,7 @@ def main(argv=None):
         ap.error("--policy or --set is required")
     runner = Runner(io, Controller(walk, tuning), safety,
                     on_fall="keep" if args.keep_on_fall else "limp", log=log, head_offset=head,
-                    policies=pset)
+                    policies=pset, rise_settle_tilt_deg=None if args.no_rise_gate else 6.0)
     viewer = None
     if args.viewer and args.backend == "sim" and os.environ.get("DISPLAY"):
         import mujoco.viewer

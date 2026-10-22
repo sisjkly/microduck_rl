@@ -74,6 +74,13 @@ class Runner:
     # (a build whose neck cannot reach HOME's +20 deg back).
     head_offset: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     policies: PolicySet | None = None
+    # Hand the rise to the gait only once the trunk has settled: within this tilt of upright
+    # and below this pitch/roll rate, checked after rise_s, at most rise_extra_max_s longer.
+    # Not in robotd (fixed rise_s): on this heavier-headed build one rise in four was still
+    # swaying back 9 deg at 1.0 s, and the gait caught it with a lunge forward (set1.npz).
+    rise_settle_tilt_deg: float | None = 6.0
+    rise_settle_rate_dps: float = 30.0
+    rise_extra_max_s: float = 2.0
 
     def __post_init__(self):
         self.state = State.LIMP
@@ -219,6 +226,13 @@ class Runner:
         self.io.wait_tick()
         return s
 
+    def _rise_settled(self, s: Sensors) -> bool:
+        if self.rise_settle_tilt_deg is None or self.rise_left <= -self.rise_extra_max_s:
+            return True
+        tilt = math.degrees(math.acos(float(np.clip(-s.imu.gravity[2], -1.0, 1.0))))
+        rate = math.degrees(float(np.hypot(s.imu.gyro[0], s.imu.gyro[1])))
+        return tilt <= self.rise_settle_tilt_deg and rate <= self.rise_settle_rate_dps
+
     def _policy_step(self, s: Sensors) -> np.ndarray:
         dt = self.io.control_dt
         # Expire windows first, so a tick after the deadline runs the next thing (control.rs).
@@ -228,7 +242,7 @@ class Runner:
                 self.move = replace(self.move, unwinding=True, remaining=sk.unwind_s)
             else:
                 self.move = None
-        if self.sit == "rising" and self.rise_left <= 0:
+        if self.sit == "rising" and self.rise_left <= 0 and self._rise_settled(s):
             self.sit = "up"
 
         cmd = self.safety.gate_command(self.command, s.t - self._command_t)

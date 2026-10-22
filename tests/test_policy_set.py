@@ -194,3 +194,28 @@ def test_limp_clears_moves(tmp_path):
     r.sit_toggle()
     r.limp()
     assert r.sit == "up" and r.move is None and not r.busy
+
+
+def test_rise_waits_for_the_trunk_to_settle(tmp_path):
+    r, nets, io = running(tmp_path)
+    r.sit_toggle(); drive(r, 101)
+    assert r.sit_toggle() is None
+    io.gravity = np.array([-math.sin(math.radians(9)), 0.0, -math.cos(math.radians(9))])  # 9 deg back
+    drive(r, 60)                                     # past rise_s = 1.0 s: still the sit/stand net
+    assert r.mode == "rise" and r.sit == "rising"
+    io.gravity = np.array([0.0, 0.0, -1.0])
+    drive(r, 2)
+    assert r.mode == "walk" and r.sit == "up"
+
+
+def test_rise_gate_times_out_and_can_be_off(tmp_path):
+    r, _, io = running(tmp_path)
+    io.gravity = np.array([-math.sin(math.radians(9)), 0.0, -math.cos(math.radians(9))])
+    r.sit_toggle(); drive(r, 101); r.sit_toggle()
+    drive(r, 50 + 100 + 2)                           # rise_s + rise_extra_max_s
+    assert r.mode == "walk"
+    r2, _, io2 = running(tmp_path / "b" if (tmp_path / "b").mkdir() is None else None)
+    r2.rise_settle_tilt_deg = None
+    io2.gravity = io.gravity.copy()
+    r2.sit_toggle(); drive(r2, 101); r2.sit_toggle(); drive(r2, 51)
+    assert r2.mode == "walk"
