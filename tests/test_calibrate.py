@@ -137,3 +137,20 @@ def test_which_moved_names_the_wiggled_joint(rig):
     got = s.which_moved(seconds=0.6)
     assert got is not None and got[0] == k and got[1] == pytest.approx(120 * C.COUNT_DEG)
     assert s.which_moved(seconds=0.2) is None                  # nothing moved
+
+
+def test_confirmation_keeps_the_watchdog_fed(rig, monkeypatch):
+    """A blocking input() starved the bridge's 1 s host watchdog and dropped every lock."""
+    import threading
+    import time as _t
+    fake, io, cal = rig
+    s = C.ZeroSession(io, ["left_ankle"], samples=3)
+    calls = []
+    real = s.refresh
+    monkeypatch.setattr(s, "refresh", lambda *a, **k: calls.append(_t.monotonic()) or real(*a, **k))
+    r, w = os.pipe()
+    monkeypatch.setattr(sys, "stdin", os.fdopen(r))
+    threading.Timer(0.8, lambda: (os.write(w, b"y\n"), os.close(w))).start()
+    assert C._ask(s, "") == "y"
+    gaps = [b - a for a, b in zip(calls, calls[1:])]
+    assert len(calls) >= 5 and max(gaps) < 0.3

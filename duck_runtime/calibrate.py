@@ -134,8 +134,10 @@ class ZeroSession:
         return math.degrees(self.cal.joints[k].to_rad(self.raw[self.id_of(k)]))
 
     def refresh(self, force_status: bool = False) -> str:
-        """Read every joint (this also feeds the bridge's 1 s watchdog); check for a fault."""
+        """Read every joint (this also feeds the bridge's 1 s watchdog); check for a fault.
+        Call it at >= 5 Hz whenever anything is locked: never block on input() in between."""
         self.raw = self.io.raw_positions()
+        self._poll_imu()
         now = time.monotonic()
         if self.locked and (force_status or now - self._status_t > 0.3):
             self._status_t = now
@@ -147,16 +149,26 @@ class ZeroSession:
                 self.locked.clear()
         return self.fault
 
-    def imu_tilt(self):
+    def _poll_imu(self) -> None:
+        # Polled every refresh: the Pi IMU driver drains its FIFO per read and only calls a
+        # quaternion fresh for 100 ms, so an occasional read would always come back "not ready".
         src = getattr(self.io, "imu_source", None)
         if src is None:
-            return None
-        imu, ready = src.read()
-        if not ready:
-            return None
-        g = imu.gravity
-        return (math.degrees(math.asin(max(-1.0, min(1.0, g[0])))),
-                math.degrees(math.asin(max(-1.0, min(1.0, g[1])))))
+            return
+        try:
+            imu, ready = src.read()
+        except Exception:
+            return
+        if ready:
+            g = imu.gravity
+            self._tilt = (math.degrees(math.asin(max(-1.0, min(1.0, g[0])))),
+                          math.degrees(math.asin(max(-1.0, min(1.0, g[1])))), time.monotonic())
+
+    def imu_tilt(self):
+        """(pitch, roll) in degrees from the last fresh IMU reading, or None."""
+        self._poll_imu()
+        t = getattr(self, "_tilt", None)
+        return t[:2] if t and time.monotonic() - t[2] < 0.5 else None
 
     def _median_raw(self, ids) -> dict[int, int]:
         rows = []
@@ -310,7 +322,7 @@ def _save(s: ZeroSession, path: str) -> bool:
     if tilt:
         print(f"  躯干：俯仰 {tilt[0]:+.1f}° 横滚 {tilt[1]:+.1f}°"
               + ("   <-- 超过 1°，建议先放平再存" if max(map(abs, tilt)) > 1.0 else ""))
-    if input("写入？输入 y 确认: ").strip().lower() != "y":
+    if _ask(s, "写入？输入 y 确认: ") != "y":
         print("没有写入。")
         return False
     if os.path.exists(path):
@@ -332,6 +344,17 @@ def _read_line(timeout: float) -> str | None:
     if line == "":
         raise EOFError
     return line.rstrip("\n")
+
+
+def _ask(s: ZeroSession, prompt: str) -> str:
+    """input() that keeps feeding the bridge watchdog while it waits (a blocking input()
+    let the 1 s host timeout drop every locked joint)."""
+    print(prompt, end="", flush=True)
+    while True:
+        s.refresh()
+        line = _read_line(0.1)
+        if line is not None:
+            return line.strip().lower()
 
 
 def console(s: ZeroSession, path: str) -> None:
@@ -406,7 +429,7 @@ def console(s: ZeroSession, path: str) -> None:
                 s.unlock_all()
                 print("  全部松开")
             elif cmd == "q":
-                if not saved and s.locked and input("有锁定的关节还没保存，确定退出？(y): ").strip().lower() != "y":
+                if not saved and s.locked and _ask(s, "有锁定的关节还没保存，确定退出？(y): ") != "y":
                     pass
                 else:
                     break
