@@ -17,6 +17,7 @@ This robot (default ``--backend bridge``): servos behind the ESP32-S3 MDK2 bridg
   python -m duck_runtime.tools hip-roll  --calib calib.json        # TORQUE, standing: hip-roll preload sweep
   python -m duck_runtime.tools imu-snap  --calib calib.json        # square IMU board: snap mount to axis-aligned
   python -m duck_runtime.tools pose-check --calib calib.json       # TORQUE, hanging: robot moves, you judge signs
+  python -m duck_runtime.tools sign-test --calib calib.json        # TORQUE, standing: IMU judges knee/hip-yaw signs
 
 Order on a new robot: template -> scan -> zero -> direction -> imu-mount -> live (check) ->
 home-test (robot hanging) -> run.
@@ -547,6 +548,75 @@ def cmd_pose_check(args):
         print("所有检查的关节方向都对。")
 
 
+def cmd_sign_test(args):
+    """TORQUE ON, robot STANDING on flat ground at HOME (hand right next to it). Objective
+    sign check for the joints that sit at ~0 in HOME, judged by the IMU, not by eye:
+      twist: both hip yaws +12 deg (model sense). SimIO: trunk yaws +3.9 deg if both signs
+             are right, -4.2 if both are reversed, ~0 if one is.
+      knees: both knees +4 deg (model sense: shins forward). SimIO: trunk pitches forward
+             ~+8 deg if right; ~0 if reversed.
+    Prints a verdict; changes nothing."""
+    from .safety import Safety
+    cal = Calibration.load(args.calib)
+    cal.validate()
+    io = open_io(args, cal)
+    safety = Safety(cal.limits())
+    home = DEFAULT_POSITION.copy()
+    home[MOUTH_INDEX] = MOUTH_CLOSED
+    io.set_torque(False)
+    start = io.read().positions.copy()
+    input("鸭子放在平地上（先扶着），按回车上力矩回 HOME；站稳后手放在旁边准备扶，但不要碰它…")
+    io.set_torque(True)
+    out = {}
+
+    def glide(a, b, n, yaw=None):
+        g = None
+        for k in range(n):
+            x = (k + 1) / n
+            s_ = io.read()
+            io.write(safety.clamp((1 - x) * a + x * b))
+            if yaw is not None and s_.imu_ready:
+                yaw[0] += math.degrees(s_.imu.gyro[2]) * io.control_dt
+            g = s_.imu.gravity
+            io.wait_tick()
+        return g
+
+    def pitch(g):
+        return math.degrees(math.asin(max(-1.0, min(1.0, g[0]))))
+
+    try:
+        glide(start, home, 100)
+        glide(home, home, 100)
+        # twist
+        t = home.copy()
+        t[0] += math.radians(12)
+        t[10] += math.radians(12)
+        yaw = [0.0]
+        glide(home, t, 50, yaw)
+        glide(t, t, 50, yaw)
+        out["twist"] = yaw[0]
+        glide(t, home, 50)
+        glide(home, home, 75)
+        # knees
+        g0 = glide(home, home, 25)
+        t = home.copy()
+        t[3] += math.radians(4)
+        t[13] -= math.radians(4)
+        glide(home, t, 50)
+        g1 = glide(t, t, 50)
+        out["knees"] = pitch(g1) - pitch(g0)
+        glide(t, home, 50)
+        glide(home, home, 50)
+    finally:
+        io.set_torque(False)
+        io.close()
+    tw, kn = out.get("twist"), out.get("knees")
+    print(f"twist: trunk yaw {tw:+.1f} deg  (sim: +3.9 both right / -4.2 both reversed / ~0 one reversed)")
+    print("   -> " + ("hip yaw signs RIGHT" if tw > 2 else "BOTH hip yaws REVERSED" if tw < -2 else "one hip yaw reversed or inconclusive"))
+    print(f"knees: trunk pitch {kn:+.1f} deg  (sim: about +8 if right, ~0 if reversed)")
+    print("   -> " + ("knee signs RIGHT" if kn > 3 else "knees REVERSED" if abs(kn) < 1.5 else "inconclusive"))
+
+
 def cmd_home_test(args):
     """TORQUE ON. Robot hanging, feet off the ground: ease to HOME over 3 s, hold, report error."""
     from .safety import Safety
@@ -758,7 +828,7 @@ def main(argv=None):
                      ("live", cmd_live), ("zero", cmd_zero),
                      ("direction", cmd_direction), ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test),
                      ("trim", cmd_trim), ("hip-roll", cmd_hip_roll), ("imu-snap", cmd_imu_snap),
-                     ("pose-check", cmd_pose_check)]:
+                     ("pose-check", cmd_pose_check), ("sign-test", cmd_sign_test)]:
         p = sub.add_parser(name)
         add_robot_args(p)
         if name not in ("scan", "relax", "step-test"):
