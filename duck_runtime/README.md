@@ -50,7 +50,7 @@ sudo systemctl stop microduck-gamepad.service     # 它会占用 /dev/ttyACM0；
 ```bash
 duck duck_runtime.tools scan                          # 14 个舵机 ok、mode 4、NPD1 yes；IMU SFLP ≈120 Hz
 duck duck_runtime.tools template calib.json           # 本机 ID 的标定模板（14 个关节方向都是 -1）
-duck duck_runtime.tools zero      --calib calib.json  # 零位：用打印的零位架子（腿竖直、脚平、脖子竖直、头平）
+duck duck_runtime.calibrate --calib calib.json       # 零位：放进零位架子，逐个关节摆好→回车上力锁住→w 保存
 duck duck_runtime.tools imu-mount --calib calib.json  # 姿态1 架子平放、姿态2 连架子前倾 30-60°（或 imu-snap）
 duck duck_runtime.tools sign-test --calib calib.json  # 平地站：IMU 判膝/髋偏航方向，两项都应 RIGHT
 duck duck_runtime.tools home-test --calib calib.json  # 吊起，上力矩 3 s 回 HOME，看每个关节误差
@@ -60,6 +60,11 @@ duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0
 
 - 结果（walk7，2026-10-22）：连续行走 67 s 不倒；vx 0.2 直走偏航 +0.4°/s；
   wz +0.8 实际 +27.7°/s（约 60%，与 mjlab 仿真的跟踪比例一致）；动作 p99 0.74（仿真步态约 0.7）。
+- `calibrate`（逐关节锁定标零位）：每个关节显示 **ID + 部位 + 名字** 和零位应该的样子；摆好按回车，
+  这个舵机就上力保持（P=32，退出恢复），摆下一个时不会被碰偏。`+`/`-` 按编码器计数微调（0.09°），
+  `u` 松开重摆，`f` 掰一下关节就告诉你是哪个 ID，`l` 看全部，`w` 保存（只改已锁定关节的 `zero_raw`，
+  先自动备份 `calib.json.bak-时间`）。`--joints legs|left|right|head|名字` 只标一部分。
+  零位变化超过 8° 会提示"是不是摆错关节"。
 - 标定的坑（本机实测，每条都花过时间）：
   - **零位用架子**。手扶标出来的脖子零位偏了 24°（以为竖直其实已后仰），HOME 时头比官方靠后，
     整机重心偏后 → 一迈步就往后退；腿零位手扶也会把躯干倾斜算进髋零位。架子标完 14 个舵机都在 2048±140 内。
