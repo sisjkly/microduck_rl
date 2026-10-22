@@ -706,8 +706,10 @@ def cmd_trim(args):
             return
         g = np.mean(grav, axis=0)
         pitch, roll = math.degrees(math.asin(g[0])), math.degrees(math.asin(g[1]))
-        delta = HOME_STAND_PITCH_DEG - pitch
-        print(f"HOME 站立：俯仰 {pitch:+.1f} deg（+ 低头），横滚 {roll:+.1f} deg；训练时 HOME 站立俯仰 {HOME_STAND_PITCH_DEG:+.1f} deg")
+        target = HOME_STAND_PITCH_DEG if args.target is None else args.target
+        delta = target - pitch
+        print(f"HOME 站立：俯仰 {pitch:+.1f} deg（+ 低头），横滚 {roll:+.1f} deg；目标 {target:+.1f} deg"
+              f"（训练时 HOME 站立约 {HOME_STAND_PITCH_DEG:+.1f}）")
         if abs(delta) < 0.7:
             print("差值 < 0.7 deg，不用修正。按回车卸力。")
             apply = False
@@ -838,6 +840,9 @@ def main(argv=None):
             p.add_argument("--counts", type=int, default=150, help="step size in encoder counts (150 = 13 deg)")
         if name in ("zero", "direction", "pose-check"):
             p.add_argument("--joints", default="", help="comma-separated subset")
+        if name == "trim":
+            p.add_argument("--target", type=float, default=None,
+                           help=f"stance pitch to trim to, deg (+ = nose down); default {HOME_STAND_PITCH_DEG}")
         if name == "home-test":
             p.add_argument("--head-cmd", default="0,0,0,0",
                            help="neck_pitch,head_pitch,head_yaw,head_roll offsets from HOME, degrees")
