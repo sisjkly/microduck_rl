@@ -128,6 +128,12 @@ uv run scripts/rehearse_set.py --set policies --scenario sitstand --push 0.35 --
 uv run scripts/rehearse_set.py --set policies --profile official    # 换成原版质量分布对比
 ```
 
+**浏览器界面（mjlab 同款 viser）**：`uv run scripts/viser_duck.py --set policies`，打开 http://localhost:8080
+（远程 GPU 机器：`ssh -L 8080:localhost:8080 <机器>`）。3D 场景和 Scene / Visualization / Groups 页是 mjviser 的
+（相机跟随、接触点、接触力、碰撞体）；Duck 页：上力矩 / 启动 / 停止 / 卸力、重置、速度 1/4–1x、摔倒规则、
+vx / vy / wz 和头部四个角度滑条、坐站和每个动作的按钮、推一下（dvx / dvy）、躯干俯仰/横滚和策略输出的实时曲线。
+默认上力矩后自动启动策略（仿真里只上力矩不跑策略，鸭子会在 ~45 s 内慢慢往前倒）。
+
 `rehearse_set.py` 用的是和真机完全相同的 Runner / Controller / policy_set，只是身体换成 SimIO
 （MuJoCo + BAM HD1910 + 质量配置，全碰撞场景）。其它参数：`--on-fall keep`（官方的摔倒后继续驱动）、
 `--cmd=0.05,0,-0.2`（全程走路指令）、`--policy` / `--sitstand`（换网络）、`--log DIR`（每次一个 npz，
