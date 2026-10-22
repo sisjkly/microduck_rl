@@ -116,9 +116,22 @@ duck duck_runtime.run --calib calib.json --set policies --log set1.npz
 
 ## 先在电脑上预演
 
+在电脑上（不是鸭子上）：`git clone -b ours-813g-hd1910 https://github.com/sisjkly/microduck_rl.git && cd microduck_rl && uv sync`
+（uv 会装好 Python 3.12、MuJoCo、BAM 舵机模型；第一次较慢）。把鸭子上的 `policies/` 拷过来：
+`scp -r user@microduck.local:~/microduck_rl/policies .`
+
 ```bash
-python -m duck_runtime.run --backend sim --policy velstand.onnx --viewer
+uv run python -m duck_runtime.run --backend sim --policy policies/velstand.onnx --viewer   # 键盘开车，同真机按键
+uv run scripts/rehearse_set.py --set policies                       # 每个动作 8 次，835 g + HD1910
+uv run scripts/rehearse_set.py --set policies --scenario roulade --seeds 1 --viewer        # 看一次翻滚
+uv run scripts/rehearse_set.py --set policies --scenario sitstand --push 0.35 --push-at 0.8  # 复现 set1 的站起摔倒
+uv run scripts/rehearse_set.py --set policies --profile official    # 换成原版质量分布对比
 ```
+
+`rehearse_set.py` 用的是和真机完全相同的 Runner / Controller / policy_set，只是身体换成 SimIO
+（MuJoCo + BAM HD1910 + 质量配置，全碰撞场景）。其它参数：`--on-fall keep`（官方的摔倒后继续驱动）、
+`--cmd=0.05,0,-0.2`（全程走路指令）、`--policy` / `--sitstand`（换网络）、`--log DIR`（每次一个 npz，
+字段同真机日志，可以直接对比）。macOS 上开 `--viewer` 要用 `mjpython` 代替 `python`。
 
 ## 其它接法（`--backend feetech`）
 
