@@ -1,7 +1,7 @@
 """A simulated body behind the same RobotIO interface as the real one.
 
 MuJoCo (CPU) + BAM M6 HD1910 actuator (STS3215 control law, firmware P=5), on the
-microduck_rl MJCF patched with this build's mass profile (813 g). The IMU is simulated
+microduck_rl MJCF patched with this build's mass profile (835 g, mouth fitted). The IMU is simulated
 at the byte level: the trunk orientation/gyro are rotated into the board frame, packed
 into the 12-byte SFLP block and decoded by the very ``SflpDecoder`` the robot uses — so
 the mount quaternion and the decoder are exercised in sim too.
@@ -30,7 +30,7 @@ STIFF_SOLIMP = (0.99, 0.9999, 0.001, 0.5, 2.0)
 
 
 class SimIO(RobotIO):
-    def __init__(self, mass_profile: str | None = "ours_813g", servo: str = "hd1910",
+    def __init__(self, mass_profile: str | None = "ours_835g", servo: str = "hd1910",
                  kp_fw: float | None = None, vin: float | None = None, physics_dt: float = 0.005,
                  decimation: int = 4, actuator_delay_steps: int = 4, imu_mount=DEFAULT_MOUNT,
                  scene: Path = SCENE, seed: int = 0):

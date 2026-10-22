@@ -34,7 +34,7 @@ _POINT_RADIUS = 0.01  # sphere radius for "point" extras (m)
 
 # Name of the profile used by microduck_constants' spec getters. Env var wins
 # so the CPU tools can A/B without editing code; None/"official" = no patch.
-DEFAULT_PROFILE = "ours_813g"
+DEFAULT_PROFILE = "ours_835g"
 PROFILE_ENV = "MICRODUCK_MASS_PROFILE"
 
 PROFILES: dict[str, dict | None] = {
@@ -48,6 +48,16 @@ PROFILES: dict[str, dict | None] = {
         "servo_extra_g": 5.0,
         "body_extra": {"jaw_soft": {"g": 0.8, "mode": "com"}},
         "target_total_g": 813.0,
+    },
+    # Same robot with its mouth fitted (confirmed 2026-10-22): the 813 g weighing was
+    # without the 22 g mouth, so real = 835 g and the head (head_pitch and up) ~282 g,
+    # while the model head with its mouth parts is ~259 g. The extra ~22 g sits in the
+    # head; where exactly is unknown, so it grows the head-roll body with CoM unchanged.
+    # Walking with the mouth fitted matched sim attitude (pitch +0.6 deg vs +0.2..+1.8).
+    "ours_835g": {
+        "servo_extra_g": 5.0,
+        "body_extra": {"jaw_soft": {"g": 22.8, "mode": "com"}},
+        "target_total_g": 835.0,
     },
     # kissqy/Microduck-kissqy "hd1910_820g_v1" (+5 g x 15; head +3 g; trunk takes
     # the rest to 820 g). Their deployed models were trained on this.

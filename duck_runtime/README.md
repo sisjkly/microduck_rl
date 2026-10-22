@@ -54,7 +54,6 @@ duck duck_runtime.tools zero      --calib calib.json  # 零位：用打印的零
 duck duck_runtime.tools imu-mount --calib calib.json  # 姿态1 架子平放、姿态2 连架子前倾 30-60°（或 imu-snap）
 duck duck_runtime.tools sign-test --calib calib.json  # 平地站：IMU 判膝/髋偏航方向，两项都应 RIGHT
 duck duck_runtime.tools home-test --calib calib.json  # 吊起，上力矩 3 s 回 HOME，看每个关节误差
-duck duck_runtime.tools trim      --calib calib.json  # 平地站 HOME，按 IMU 修髋俯仰零位（跑到 <0.7°）
 duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0.7 --log walk.npz
 #   键：1 上力矩回 HOME → 2 启动策略 → w/s a/d 给指令；3 停止回 HOME；0 卸力；Ctrl+C 退出
 ```
@@ -67,6 +66,10 @@ duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0
   - **方向别靠人眼**。`direction`（人掰关节）和 `pose-check`（看机器人动）的人眼判断两次与 IMU 相反；
     HOME 下接近 0 的膝、髋偏航、头偏航/横滚最容易错，用 `sign-test`（IMU 判）定。本机 14 个都是 -1
     （HD1910 与 XL330 转向相反，-1 正是这个补偿）。
+  - **架子标零位后不要再用 `trim`**：它故意挪髋零位去凑站姿俯仰，策略看到的髋角就不准了
+    （walk10：走 26 s 就失稳）。`trim` 只适合手扶标零位、零位本身有误差的情况。
+  - **嘴别忘了装**：最初 813 g 是不带嘴（22 g）称的，模型里却有嘴，头的重心比模型靠后，
+    走路一直往后靠；装上嘴（835 g）后走路俯仰 +0.6°，落在仿真范围（+0.2～+1.8°）内。质量配置已改为 `ours_835g`。
   - 一次一条命令，别整段粘贴（后面的行会被当成回车吃掉）；`--head-cmd=-10,...` 负数要用等号。
 - `scan` 里如果某个舵机 `acc/time/speed` 非 0（`<-- move limit set`）先告诉我：桥只写目标位置，
   这几个寄存器里的旧值会限制每次运动，和训练假设不一致。

@@ -85,3 +85,18 @@ def test_constants_apply_active_profile(monkeypatch):
     assert mc.get_walk_spec().compile().body_mass.sum() == pytest.approx(0.813, abs=1e-4)
     monkeypatch.setenv(mp.PROFILE_ENV, "official")
     assert mc.get_walk_spec().compile().body_mass.sum() == pytest.approx(0.7372, abs=1e-4)
+
+
+@pytest.mark.parametrize("xml", VARIANTS)
+def test_ours_835g_total_and_head(xml):
+    m0, m = _model(xml, None), _model(xml, "ours_835g")
+    assert m.body_mass.sum() * 1000 == pytest.approx(835.0, abs=1.0)
+    if xml == "robot_walk.xml":
+        # mouth fitted: head (head_pitch and up) weighed ~260 g without it + 22 g mouth
+        assert m.body_subtreemass[m.body("neck_pitch").id] * 1000 == pytest.approx(282.0, abs=3.0)
+    I = np.sort(m.body_inertia[1:], axis=1)
+    assert np.all(I > 0) and np.all(I[:, 0] + I[:, 1] >= I[:, 2] * (1 - 1e-9))
+
+
+def test_default_profile_is_the_robot_with_mouth():
+    assert mp.DEFAULT_PROFILE == "ours_835g"
