@@ -154,7 +154,7 @@ vx / vy / wz 和头部四个角度滑条、坐站和每个动作的按钮、推�
 用 `robot` 时仿真复现了真机现象：右踢往前倒、左踢没事，站起时膝盖晚动、伸直变慢；换 `robot-full` 右踢不倒。
 
 `rehearse_set.py` 用的是和真机完全相同的 Runner / Controller / policy_set，只是身体换成 SimIO
-（MuJoCo + BAM HD1910 + 质量配置，全碰撞场景）。其它参数：`--on-fall keep`（官方的摔倒后继续驱动）、
+（MuJoCo + BAM HD1910 + 质量配置，全碰撞场景）。其它参数：`--on-fall getup`（官方的原地起身）或 `keep`（一直驱动）、
 `--cmd=0.05,0,-0.2`（全程走路指令）、`--policy` / `--sitstand`（换网络）、`--log DIR`（每次一个 npz，
 字段同真机日志，可以直接对比）。macOS 上开 `--viewer` 要用 `mjpython` 代替 `python`。
 
