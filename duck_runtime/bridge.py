@@ -299,6 +299,8 @@ class BridgeIO(RobotIO):
         self.gains = gains
         self.k_of = [k for k, j in enumerate(calibration.joints) if j.id]
         self.ids = [calibration.joints[k].id for k in self.k_of]
+        self.port_path = port
+        self.link_retries = 0
         self.bridge = Bridge(port)
         self.served = self.bridge.served_ids()
         unknown = set(self.ids) - set(self.served)
@@ -332,8 +334,30 @@ class BridgeIO(RobotIO):
         self.diag = {i: parse_diag(d) for i, d in self.bridge.sync_read(ADDR_DIAG, 32, self.ids).items()}
         return {i: d["raw"] for i, d in self.diag.items()}
 
+    def reconnect(self) -> dict:
+        """Reopen the USB port after the bridge vanished (e.g. the ESP32 rebooted on a supply
+        dip). Torque is off afterwards (a reboot or the 1 s host timeout dropped it)."""
+        try:
+            self.bridge.close()
+        except OSError:
+            pass
+        self.bridge = Bridge(self.port_path)
+        self.served = self.bridge.served_ids()
+        missing = set(self.ids) - set(self.served)
+        if missing:
+            raise BridgeError(f"bridge back but IDs {sorted(missing)} missing")
+        self.diag = {i: parse_diag(d) for i, d in self.bridge.sync_read(ADDR_DIAG, 32, self.ids).items()}
+        self.fw_map = {i: (d["center"], d["direction"]) for i, d in self.diag.items()}
+        self._next_tick = time.monotonic()
+        return self.bridge.status()
+
     def read(self) -> Sensors:
-        diag = {i: parse_diag(d) for i, d in self.bridge.sync_read(ADDR_DIAG, 32, self.ids).items()}
+        try:
+            raw = self.bridge.sync_read(ADDR_DIAG, 32, self.ids)
+        except BridgeError:
+            self.link_retries += 1           # one lost reply: ask again before giving up
+            raw = self.bridge.sync_read(ADDR_DIAG, 32, self.ids)
+        diag = {i: parse_diag(d) for i, d in raw.items()}
         self.diag = diag
         pos, vel = np.zeros(NUM_JOINTS), np.zeros(NUM_JOINTS)
         for k, j in enumerate(self.cal.joints):

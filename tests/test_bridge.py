@@ -76,6 +76,7 @@ class FakeBridge:
         self.mode = 4
         self.speed_limit = 0
         self.alive = True
+        self.mute = False            # an ESP32 that stopped answering (rebooting, USB gone)
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
 
@@ -145,6 +146,8 @@ class FakeBridge:
             except OSError:
                 return
             pkts, buf = _parse_instructions(buf + chunk)
+            if self.mute:
+                continue
             for id_, ins, p in pkts:
                 if ins == B.INS_PING:
                     if id_ in self.raw:
@@ -577,6 +580,45 @@ def test_mouth_servo_reads_writes_and_takes_part_in_torque_and_fault_clearing():
         fake.fault = 1
         io.set_torque(False)                               # all 15 off -> clears the fault
         assert _eventually(lambda: fake.fault == 0 and fake.torque == 0)
+    finally:
+        fake.alive = False
+        io.close()
+
+
+
+def test_lost_link_limps_and_reconnects_instead_of_crashing():
+    from duck_runtime.controller import Controller, Tuning
+    from duck_runtime.runner import Runner, State
+    from duck_runtime.safety import Safety
+
+    class _Zero:
+        def __call__(self, obs):
+            return np.zeros(14, dtype=np.float32)
+
+    master, slave = pty.openpty()
+    fake = FakeBridge(master)
+    cal = _calibrated()
+    io = B.BridgeIO(os.ttyname(slave), cal, StaticImu(), control_dt=0.002)
+    try:
+        r = Runner(io, Controller(_Zero(), Tuning.official()), Safety(cal.limits()), ramp_s=0.02)
+        r.enable()
+        for _ in range(20):
+            r.tick()
+        assert r.state is State.HOLD
+        fake.mute = True                                  # the ESP32 browns out
+        r.tick()                                          # no exception escapes
+        assert r.state is State.LIMP and "link lost" in r.refusal and r.link_errors == 1
+        fake.mute = False
+        fake.torque = 0
+        time.sleep(1.05)
+        r.tick()                                          # back: reconnected or simply answering again
+        assert r.refusal.startswith(("reconnected", "link restored")), r.refusal
+        r.tick()
+        assert r.state is State.LIMP and r.link_errors >= 1
+        r.enable()                                        # usable again
+        for _ in range(20):
+            r.tick()
+        assert r.state is State.HOLD
     finally:
         fake.alive = False
         io.close()

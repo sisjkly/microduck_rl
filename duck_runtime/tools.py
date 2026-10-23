@@ -123,7 +123,9 @@ def _scan_bridge(args):
     b = Bridge(_port(args))
     try:
         st = b.status()
-        print(f"MDK2 v{st['version']}  uptime {st['uptime_ms'] / 1000:.1f} s  reset reason {st['reset_reason']}  "
+        rr = {0: "unknown", 1: "power-on", 3: "software", 4: "crash", 5: "int watchdog", 6: "task watchdog",
+              7: "watchdog", 9: "BROWNOUT (supply dip)", 11: "USB", 12: "JTAG/USB flash"}.get(st["reset_reason"], "?")
+        print(f"MDK2 v{st['version']}  uptime {st['uptime_ms'] / 1000:.1f} s  reset reason {st['reset_reason']} ({rr})  "
               f"fault {st['fault']} ({st['fault_name']})")
         print(f"  fresh 0x{st['valid_mask']:04x}  config 0x{st['config_mask']:04x}  torque 0x{st['torque_mask']:04x}  "
               f"fw-calibrated 0x{st['calibrated_mask']:04x}  bus cycle {st['cycle_us']} us  "

@@ -99,6 +99,10 @@ class Runner:
         self._command_t = -1e9
         self._ramp_from: np.ndarray | None = None
         self._ramp_t0 = 0.0
+        self.link_errors = 0
+        self._link_down = False
+        self._reconnect_t = -1e9
+        self.link_ok_since = 0.0
         self.fall_events = 0          # falls that cut torque
         self.falls_seen = 0           # every fall verdict while running (keep mode gets up)
         self._was_fallen = False
@@ -214,8 +218,40 @@ class Runner:
         self._command_t = now
 
     # -- one control period ----------------------------------------------------------------
+    def _link_lost(self, err: Exception) -> None:
+        """The body stopped answering (bridge reply lost, USB gone, servo feedback stale).
+        The firmware drops torque by itself after 1 s of host silence; here: stop driving,
+        say why, and try to reconnect once a second."""
+        self.link_errors += 1
+        self._link_down = True
+        if self.state is not State.LIMP:
+            self.state = State.LIMP
+            self._clear_moves()
+            self.refusal = f"link lost: {err}"
+        now = time.monotonic()
+        if hasattr(self.io, "reconnect") and now - self._reconnect_t >= 1.0:
+            self._reconnect_t = now
+            try:
+                st = self.io.reconnect()
+                why = {9: "brownout (supply dip)", 4: "crash", 1: "power-on", 3: "software reset",
+                       5: "watchdog", 6: "watchdog", 7: "watchdog"}.get(st.get("reset_reason"), f"reason {st.get('reset_reason')}")
+                self.refusal = (f"reconnected: bridge up {st.get('uptime_ms', 0) / 1000:.1f} s, last reset: {why}"
+                                if isinstance(st, dict) else "reconnected")
+                self.link_ok_since = now
+                self._link_down = False
+            except (RuntimeError, OSError) as e:
+                self.refusal = f"link lost: {err}; reconnect failed: {e}"
+
     def tick(self) -> Sensors:
-        s = self.io.read()
+        try:
+            s = self.io.read()
+        except (RuntimeError, OSError) as e:
+            self._link_lost(e)
+            self.io.wait_tick()
+            return self.last_sensors if self.last_sensors is not None else Sensors()
+        if self._link_down:
+            self._link_down = False
+            self.refusal = "link restored (torque is off: enable again)"
         fallen = self.safety.update_fall(s) if s.imu_ready else False
         obs = targets = None
 
