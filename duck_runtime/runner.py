@@ -110,6 +110,9 @@ class Runner:
         self.last_sensors: Sensors | None = None
         self.last_targets: np.ndarray | None = None
         self.predictor = FallPredictor()
+        # Mouth (not a policy joint): held here, applied to every target. Moves only on a
+        # build whose calibration gives the mouth a servo ID.
+        self.mouth_target = MOUTH_CLOSED
 
     def _clear_moves(self) -> None:
         self.move: _Move | None = None
@@ -265,6 +268,7 @@ class Runner:
 
         self.last_sensors = s
         if targets is not None:
+            targets[MOUTH_INDEX] = self.mouth_target
             targets = self.safety.clamp(targets)
             self.io.write(targets)
             self.last_targets = targets

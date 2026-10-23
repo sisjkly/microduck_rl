@@ -13,6 +13,7 @@ Keys:  1 enable (torque on, ease to HOME)   2 start policy   3 stop (back to HOM
        0 limp (torque off)                  w/s vx +-0.05    z/c vy +-0.05
        a/d yaw +-0.2                        space zero command
   with --set:  x sit / stand    g ground pick    k / l kick left / right    r roulade
+       m open / close the mouth (when calib.json gives the mouth a servo: tools mouth)
        Ctrl+C: limp and exit.  The policy needs >= ~0.2 m/s to start stepping.
 """
 
@@ -34,6 +35,7 @@ from .runner import Runner, State, TickLog
 from .safety import Safety
 
 VX_MAX, VY_MAX, WZ_MAX = 0.3, 0.2, 1.0
+MOUTH_OPEN = math.radians(25.0)
 
 
 class Keys:
@@ -188,6 +190,9 @@ def main(argv=None):
                     elif k == "a": wz = min(WZ_MAX, wz + 0.2)
                     elif k == "d": wz = max(-WZ_MAX, wz - 0.2)
                     elif k == " ": vx = vy = wz = 0.0
+                    elif k == "m":
+                        from .contract import MOUTH_CLOSED
+                        runner.mouth_target = MOUTH_OPEN if runner.mouth_target <= MOUTH_CLOSED + 1e-6 else MOUTH_CLOSED
                     elif k == "x" and pset is not None:
                         why = runner.sit_toggle()
                         print(f"\n[{'sit/stand' if why is None else 'refused'}] {why or runner.sit}")

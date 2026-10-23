@@ -158,3 +158,12 @@ def test_record_save_list_download(dash):
 def test_page_is_served(dash):
     st, html = call(dash, "GET", "/")
     assert st == 200 and b"Microduck" in html and b"/api/stream" in html
+
+
+def test_mouth_endpoint_clamps_and_reports_no_servo(dash):
+    st, body = call(dash, "POST", "/api/mouth", {"deg": 50})
+    assert body["ok"] and body["deg"] == 30.0 and body["servo"] is False
+    assert dash.runner.mouth_target == pytest.approx(np.radians(30))
+    st, info = call(dash, "GET", "/api/info")
+    assert info["mouth"] == {"servo": False, "range_deg": [-5.0, 30.0]}
+    assert call(dash, "POST", "/api/mouth", {"deg": -5})[1]["deg"] == -5.0

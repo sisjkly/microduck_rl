@@ -59,15 +59,17 @@ def _parse_instructions(buf: bytes):
 
 
 class FakeBridge:
-    ALL = (1 << 14) - 1
+    """bridge_runtime.cpp in miniature: serves IDs 1..n (14 stock, 15 with add_mouth.py)."""
 
-    def __init__(self, master):
+    def __init__(self, master, n_servos=14):
         self.fd = master
-        self.raw = {i: 2048 + 10 * i for i in B.BRIDGE_IDS}
-        self.speed = {i: 0 for i in B.BRIDGE_IDS}
-        self.pd = {i: [32, 40] for i in B.BRIDGE_IDS}
-        self.center = {i: 2048 for i in B.BRIDGE_IDS}
-        self.dir = {i: -1 for i in B.BRIDGE_IDS}
+        self.ids = tuple(range(1, n_servos + 1))
+        self.ALL = (1 << n_servos) - 1
+        self.raw = {i: 2048 + 10 * i for i in self.ids}
+        self.speed = {i: 0 for i in self.ids}
+        self.pd = {i: [32, 40] for i in self.ids}
+        self.center = {i: 2048 for i in self.ids}
+        self.dir = {i: -1 for i in self.ids}
         self.goal_ft = {}
         self.torque = 0
         self.fault = 0
@@ -108,6 +110,7 @@ class FakeBridge:
         return None
 
     def _write(self, addr, width, rows):
+        rows = [(i, v) for i, v in rows if i in self.raw]     # dxIndex < 0: ignored
         if addr == 64:
             vals = {i: v[0] for i, v in rows}
             if any(vals.values()):
@@ -121,7 +124,7 @@ class FakeBridge:
                 self.torque = self.torque | (1 << (i - 1)) if v else self.torque & ~(1 << (i - 1))
                 if v and i in self.goal_ft:
                     self.raw[i] = self.goal_ft[i]
-            if not any(vals.values()) and len(vals) == 14:
+            if not any(vals.values()) and len(vals) == len(self.ids):
                 self.fault = 0
         elif addr == 116:
             for i, v in rows:
@@ -144,7 +147,8 @@ class FakeBridge:
             pkts, buf = _parse_instructions(buf + chunk)
             for id_, ins, p in pkts:
                 if ins == B.INS_PING:
-                    self._status(id_, 0, b"\xb0\x04\x02")
+                    if id_ in self.raw:
+                        self._status(id_, 0, b"\xb0\x04\x02")
                 elif ins == B.INS_READ:
                     addr, n = struct.unpack("<HH", p)
                     d = self._reg(id_, addr, n)
@@ -249,8 +253,8 @@ def test_bridge_torque_on_sets_trained_gains_holds_pose_then_tracks(rig):
     fake, io, cal = rig
     before = dict(fake.raw)
     io.set_torque(True)
-    assert all(fake.pd[i] == [5, 0] for i in B.BRIDGE_IDS)
-    assert fake.torque == FakeBridge.ALL
+    assert all(fake.pd[i] == [5, 0] for i in fake.ids)
+    assert fake.torque == fake.ALL
     assert fake.raw == before  # goal = present position: no jump at torque-on
     target = C.DEFAULT_POSITION.copy()
     io.write(target)
@@ -270,7 +274,7 @@ def test_bridge_fault_refuses_torque_and_limp_clears_it(rig):
     io.set_torque(False)
     assert _eventually(lambda: fake.fault == 0)
     io.set_torque(True)
-    assert fake.torque == FakeBridge.ALL
+    assert fake.torque == fake.ALL
 
 
 def test_bridge_close_restores_original_gains(rig):
@@ -278,7 +282,7 @@ def test_bridge_close_restores_original_gains(rig):
     io.set_torque(True)
     io.close()
     assert fake.torque == 0
-    assert all(fake.pd[i] == [32, 40] for i in B.BRIDGE_IDS)
+    assert all(fake.pd[i] == [32, 40] for i in fake.ids)
 
 
 def test_bridge_port_is_exclusive(rig):
@@ -484,3 +488,95 @@ def test_imu_snap_recovers_square_mount_and_sign_of_residual():
     for _ in range(30):
         g = dec.decode(encode_block([0, 0, 0], quat_mul(np.array([1.0, 0, 0, 0]), true_mount))).gravity
     assert math.degrees(math.asin(g[0])) == pytest.approx(-3.0, abs=0.2)
+
+
+
+# -- the mouth servo (add_mouth.py firmware: 15 servos) ----------------------------------------
+
+STOCK_CONFIG = """#pragma once
+#include <stdint.h>
+constexpr int FEETECH_RX_PIN = 6;
+constexpr int SERVO_COUNT = 14;     // AI-FanGe image: no mouth joint in its 14-action policy
+constexpr uint16_t ALL_SERVOS = (1u << SERVO_COUNT) - 1;
+constexpr uint8_t DXL_IDS[SERVO_COUNT] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14};
+constexpr uint8_t BUS_IDS[SERVO_COUNT] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14};
+constexpr int8_t JOINT_DIR[SERVO_COUNT] = {-1,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+constexpr int32_t FT_AT_DXL_CENTER[SERVO_COUNT] = {
+  2048,2100,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048
+};
+constexpr uint16_t FT_MIN[SERVO_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+constexpr uint16_t FT_MAX[SERVO_COUNT] = {
+  4095,4095,4095,4095,4095,4095,4095,4095,4095,4095,4095,4095,4095,4095
+};
+constexpr uint16_t CALIBRATED_MASK = 0x3FFF;
+static_assert(SERVO_COUNT <= 14, "Update buffer and diagnostic layouts before adding joints");
+"""
+
+
+def test_add_mouth_patch_keeps_existing_servos(tmp_path):
+    import re
+    from duck_runtime.esp32_bridge_patch.add_mouth import main as add_mouth
+    (tmp_path / "bridge_config.h").write_text(STOCK_CONFIG)
+    add_mouth([str(tmp_path)])
+    out = (tmp_path / "bridge_config.h").read_text()
+    assert "SERVO_COUNT = 15;" in out and "0x7FFF" in out and "SERVO_COUNT <= 16" in out
+    assert "{1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}" in out
+    assert "{-1,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}" in out          # servo 2's +1 kept
+    assert "2048,2100," + ",".join(["2048"] * 13) in out                     # center kept, mouth 2048
+    assert (tmp_path / "bridge_config.h.before_mouth").read_text() == STOCK_CONFIG
+    add_mouth([str(tmp_path)])                                               # idempotent
+    assert (tmp_path / "bridge_config.h").read_text() == out
+
+
+def _mouth_cal():
+    cal = _calibrated()
+    m = cal.joints[C.MOUTH_INDEX]
+    m.id, m.zero_raw, m.direction, m.calibrated = 15, 1500, 1, True
+    return cal
+
+
+def test_mouth_calibration_needs_the_15_servo_firmware():
+    master, slave = pty.openpty()
+    fake = FakeBridge(master)                      # stock: 14 servos
+    try:
+        with pytest.raises(B.BridgeError, match="add_mouth"):
+            B.BridgeIO(os.ttyname(slave), _mouth_cal(), StaticImu())
+    finally:
+        fake.alive = False
+        os.close(slave)
+
+
+def test_mouth_servo_reads_writes_and_takes_part_in_torque_and_fault_clearing():
+    from duck_runtime.controller import Controller, Tuning
+    from duck_runtime.runner import Runner
+    from duck_runtime.safety import Safety
+
+    class _Zero:
+        def __call__(self, obs):
+            return np.zeros(14, dtype=np.float32)
+
+    master, slave = pty.openpty()
+    fake = FakeBridge(master, n_servos=15)
+    cal = _mouth_cal()
+    io = B.BridgeIO(os.ttyname(slave), cal, StaticImu(), control_dt=0.002)
+    try:
+        assert io.served == list(range(1, 16))
+        m = cal.joints[C.MOUTH_INDEX]
+        fake.raw[15] = m.to_raw(C.MOUTH_CLOSED)
+        assert io.read().positions[C.MOUTH_INDEX] == pytest.approx(C.MOUTH_CLOSED, abs=2e-3)
+        r = Runner(io, Controller(_Zero(), Tuning.official()), Safety(cal.limits()), ramp_s=0.02)
+        r.enable()
+        assert _eventually(lambda: fake.torque == fake.ALL)  # the mouth holds too
+        r.mouth_target = math.radians(20)
+        for _ in range(20):
+            r.tick()
+        assert _eventually(lambda: abs(fake.raw[15] - m.to_raw(math.radians(20))) <= 1)
+        r.mouth_target = math.radians(80)                  # clamped to the mouth's range (30 deg)
+        r.tick()
+        assert _eventually(lambda: abs(fake.raw[15] - m.to_raw(math.radians(30))) <= 1)
+        fake.fault = 1
+        io.set_torque(False)                               # all 15 off -> clears the fault
+        assert _eventually(lambda: fake.fault == 0 and fake.torque == 0)
+    finally:
+        fake.alive = False
+        io.close()

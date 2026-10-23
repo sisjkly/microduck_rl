@@ -42,6 +42,7 @@ STATIC = Path(__file__).resolve().parent / "dashboard_static"
 FRAME_HZ = 10.0
 COMMAND_TTL_S = 0.5
 LIMITS = {"vx": 0.3, "vy": 0.2, "wz": 1.0, "head_deg": 60.0}
+MOUTH_RANGE_DEG = (-5.0, 30.0)     # MJCF mouth travel; -5 = closed
 LOG_NAME = re.compile(r"^[A-Za-z0-9_.-]+\.npz$")
 
 
@@ -111,6 +112,18 @@ class Dashboard:
         if "error" in box:
             return {"ok": False, "error": box["error"]}
         return box.get("result") or {"ok": True}
+
+    def mouth_servo(self) -> bool:
+        cal = getattr(self.io, "cal", None)
+        return bool(cal is not None and cal.joints[MOUTH_INDEX].id)
+
+    def set_mouth(self, body: dict) -> dict:
+        deg = float(body.get("deg"))
+        if not math.isfinite(deg):
+            raise ValueError("deg")
+        deg = max(MOUTH_RANGE_DEG[0], min(MOUTH_RANGE_DEG[1], deg))
+        self.runner.mouth_target = math.radians(deg)   # a float store: safe from this thread
+        return {"ok": True, "deg": deg, "servo": self.mouth_servo()}
 
     def set_command(self, body: dict) -> dict:
         c = self.cmd.copy()
@@ -237,6 +250,7 @@ class Dashboard:
             "tuning": {"action_scale": r.controller.tuning.action_scale},
             "on_fall": r.on_fall, "getup_timeout_s": r.getup_timeout_s,
             "token_required": self.token is not None,
+            "mouth": {"servo": self.mouth_servo(), "range_deg": MOUTH_RANGE_DEG},
         }
 
     def log_event(self, level: str, message: str) -> None:
@@ -307,6 +321,7 @@ class Dashboard:
             "falls": r.falls_seen, "limped": r.fall_events,
             "on_fall": r.on_fall, "getup_timeout_s": r.getup_timeout_s,
             "cmd": {**self.cmd, "age_s": _num(min(99.0, time.monotonic() - self.cmd_wall), 2)},
+            "mouth_deg": _num(math.degrees(r.mouth_target), 1),
             "imu": {"ready": imu_ready, "pitch": _num(pitch, 1), "roll": _num(roll, 1), "gyro": gyro},
             "joints": {"pos": pos, "tgt": tgt, "vel": vel,
                        "cur": _arr(cur, 0) if cur is not None else None,
@@ -447,7 +462,7 @@ def make_handler(dash: Dashboard):
                 body = json.loads(raw or b"{}")
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
-                route = {"/api/command": dash.set_command, "/api/action": dash.action,
+                route = {"/api/command": dash.set_command, "/api/action": dash.action, "/api/mouth": dash.set_mouth,
                          "/api/settings": dash.settings, "/api/record": dash.record}.get(path)
                 if route is None:
                     self._json({"ok": False, "error": "not found"}, 404)

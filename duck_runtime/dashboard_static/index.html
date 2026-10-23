@@ -135,6 +135,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin:
       <div class="slider"><label>左右 vy</label><input type="range" id="vy" min="-0.2" max="0.2" step="0.05" value="0"><output id="vyo">0.00</output></div>
       <div class="slider"><label>转向 wz</label><input type="range" id="wz" min="-1" max="1" step="0.1" value="0"><output id="wzo">0.0</output></div>
       <div class="muted" id="cmdEcho">机器人收到：—</div>
+      <div class="slider"><label>张嘴</label><input type="range" id="mouth" min="-5" max="30" step="1" value="-5"><output id="moutho">闭</output></div>
+      <div class="muted" id="mouthNote"></div>
       <details>
         <summary>头部姿态（相对 HOME，度）</summary>
         <div class="slider"><label>neck_pitch</label><input type="range" class="head" data-i="0" min="-60" max="60" step="1" value="0"><output>0</output></div>
@@ -160,7 +162,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin:
       </div>
       <div class="keys">键盘：<kbd>1</kbd> 上力矩 <kbd>2</kbd> 启动 <kbd>3</kbd> 停止 <kbd>0</kbd> 卸力 ·
         <kbd>w</kbd>/<kbd>s</kbd> 前后 <kbd>z</kbd>/<kbd>c</kbd> 左右 <kbd>a</kbd>/<kbd>d</kbd> 转向 <kbd>空格</kbd> 清零 ·
-        <kbd>x</kbd> 坐/站 <kbd>g</kbd> 捡 <kbd>k</kbd>/<kbd>l</kbd> 踢 <kbd>r</kbd> 翻滚</div>
+        <kbd>x</kbd> 坐/站 <kbd>g</kbd> 捡 <kbd>k</kbd>/<kbd>l</kbd> 踢 <kbd>r</kbd> 翻滚 <kbd>m</kbd> 张嘴</div>
     </div>
   </section>
 
@@ -285,7 +287,13 @@ const KEYS = { "1": () => act("enable"), "2": () => act("start"), "3": () => act
   w: () => setAxis("vx", cmd.vx + 0.05), s: () => setAxis("vx", cmd.vx - 0.05),
   z: () => setAxis("vy", cmd.vy + 0.05), c: () => setAxis("vy", cmd.vy - 0.05),
   a: () => setAxis("wz", cmd.wz + 0.2), d: () => setAxis("wz", cmd.wz - 0.2), " ": zero,
-  x: () => act("sit") };
+  x: () => act("sit"), m: () => setMouth(cmd.mouth > -4 ? -5 : 25) };
+cmd.mouth = -5;
+function setMouth(v) {
+  cmd.mouth = +v; $("mouth").value = v; $("moutho").textContent = v <= -4.5 ? "闭" : `${(+v).toFixed(0)}°`;
+  post("/api/mouth", { deg: +v });
+}
+$("mouth").oninput = () => setMouth($("mouth").value);
 document.addEventListener("keydown", (e) => {
   if (e.target.closest("input, select, textarea") && e.target.type !== "range") return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -311,6 +319,7 @@ function moveBtn(label, key, fn, id) {
   b.style.flex = "1 1 45%"; b.onclick = fn; return b;
 }
 function buildJoints() {
+  if (info.mouth && info.mouth.servo && !GROUPS[1][1].includes(9)) GROUPS[1][1].push(9);
   const tb = $("joints"); tb.innerHTML = "";
   GROUPS.forEach(([title, idx]) => {
     const g = document.createElement("tr"); g.className = "group"; g.innerHTML = `<td colspan="9">${title}</td>`; tb.appendChild(g);
@@ -337,6 +346,9 @@ async function loadInfo() {
   $("onFall").value = info.on_fall; $("getup").value = info.getup_timeout_s || 0;
   if (info.token_required && !token) banner("没有控制权限：请用机器人终端上打印的带 token 的地址打开本页。");
   buildMoves(); buildJoints(); buildLadder();
+  const ms = info.mouth && info.mouth.servo;
+  $("mouth").disabled = !ms;
+  $("mouthNote").textContent = ms ? "键 m：张嘴/闭嘴" : "嘴没有接舵机：刷 15 舵机桥固件后用 tools mouth 标定（见 README）";
 }
 async function loadLogs() {
   const logs = await (await fetch("/api/logs")).json();
@@ -451,7 +463,7 @@ function render(f) {
   if (info) {
     const J = f.joints;
     info.joints.forEach((jj, j) => {
-      if (jj.mouth) return;
+      if (jj.mouth && !(info.mouth && info.mouth.servo)) return;
       const tr = $("j" + j); if (!tr) return; const td = tr.children;
       const pos = J.pos ? J.pos[j] : null, tgt = J.tgt ? J.tgt[j] : null, err = pos != null && tgt != null ? tgt - pos : null;
       cell(td[1], fmt(pos)); cell(td[2], fmt(tgt)); cell(td[3], fmt(err), cls(Math.abs(err || 0), 15, 30));

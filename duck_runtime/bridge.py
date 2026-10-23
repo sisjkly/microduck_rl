@@ -1,4 +1,4 @@
-"""This robot's servo path: Pi --USB CDC--> ESP32-S3 "MDK2" bridge --UART--> 14x HD1910.
+"""This robot's servo path: Pi --USB CDC--> ESP32-S3 "MDK2" bridge --UART--> 14x HD1910 (+ mouth).
 
 The ESP32-S3 firmware (microduck_esp32_bridge, bridge_runtime.cpp) answers Dynamixel
 Protocol 2.0 on its native USB port, one virtual XL330 per servo, and drives the Feetech
@@ -10,7 +10,7 @@ bus itself (polls feedback every 10 ms). Only this subset is used:
                  temperature, error, firmware center/direction, mode, fresh/config flags
   READ 360 x16   "NPD1" native P/D state
   READ 1024+a    read-only window onto the servo's real register a (verifies RAM P/D)
-  SYNC READ      of 320 x32 for all 14 joints (one round trip per tick)
+  SYNC READ      of 320 x32 for every joint (one round trip per tick)
   SYNC WRITE 116 goal (virtual units, int32)   SYNC WRITE 64 torque
   INSTR 0xA1     "NPD1" p d: write native RAM P(50)/D(51) directly, torque must be off
 
@@ -21,7 +21,10 @@ exactly whatever bridge_config.h says.
 
 Firmware safety we rely on (bridge_runtime.cpp): torque drops and a fault latches on host
 silence > 1 s, stale feedback > 100 ms, servo error, wrong mode or a goal outside its raw
-limits. A torque-off written to all 14 joints clears a latched fault.
+limits. A torque-off written to every servo the bridge serves clears a latched fault.
+
+The stock sketch serves IDs 1-14; esp32_bridge_patch/add_mouth.py adds the mouth (ID 15).
+Which IDs answer is found by pinging at connect, so both firmwares work.
 
 Pure stdlib + numpy (termios, no pyserial), so it runs in ~/microduck/.venv as is.
 """
@@ -43,7 +46,7 @@ from .calibration import Calibration
 from .contract import MOUTH_CLOSED, NUM_JOINTS
 from .io import RobotIO, Sensors
 
-BRIDGE_IDS = tuple(range(1, 15))
+BRIDGE_IDS = tuple(range(1, 16))   # IDs a bridge may serve: 1-14, plus 15 with the mouth firmware
 ADDR_TORQUE, ADDR_GOAL = 64, 116
 ADDR_STATUS, ADDR_DIAG, ADDR_NPD, NATIVE_BASE = 256, 320, 360, 1024
 INS_PING, INS_READ, INS_SYNC_READ, INS_SYNC_WRITE, INS_NPD = 0x01, 0x02, 0x82, 0x83, 0xA1
@@ -222,6 +225,10 @@ class Bridge:
         except BridgeError:
             return False
 
+    def served_ids(self) -> list[int]:
+        """The virtual IDs this firmware answers (PING): 1-14, or 1-15 with the mouth patch."""
+        return [i for i in BRIDGE_IDS if self.ping(i)]
+
     def read(self, id_: int, addr: int, n: int, timeout_s: float | None = None) -> bytes:
         err, data = self._transact(packet(id_, INS_READ, struct.pack("<HH", addr, n)), [id_], timeout_s)[id_]
         if err or len(data) != n:
@@ -281,7 +288,7 @@ def parse_diag(b: bytes) -> dict:
 
 class BridgeIO(RobotIO):
     """RobotIO over the MDK2 bridge. A joint whose calibration id is 0 has no servo
-    (this robot's mouth): it reads as MOUTH_CLOSED and its targets are dropped."""
+    (the mouth before add_mouth.py): it reads as MOUTH_CLOSED and its targets are dropped."""
 
     def __init__(self, port: str, calibration: Calibration, imu_source, control_dt: float = 0.02,
                  gains: tuple[int, int] = (TRAINED_P, TRAINED_D)):
@@ -292,10 +299,15 @@ class BridgeIO(RobotIO):
         self.gains = gains
         self.k_of = [k for k, j in enumerate(calibration.joints) if j.id]
         self.ids = [calibration.joints[k].id for k in self.k_of]
-        unknown = set(self.ids) - set(BRIDGE_IDS)
-        if unknown:
-            raise BridgeError(f"calibration uses IDs {sorted(unknown)} the bridge does not serve (1-14)")
         self.bridge = Bridge(port)
+        self.served = self.bridge.served_ids()
+        unknown = set(self.ids) - set(self.served)
+        if unknown:
+            self.bridge.close()
+            hint = (" — the mouth needs the 15-servo bridge firmware (duck_runtime/esp32_bridge_patch/add_mouth.py)"
+                    if unknown <= {15} else "")
+            raise BridgeError(f"calibration uses IDs {sorted(unknown)} the bridge does not serve "
+                              f"(it answers {self.served}){hint}")
         st = self.bridge.status()
         if st["version"] != 2:
             raise BridgeError(f"MDK2 version {st['version']}, this backend speaks version 2")
@@ -346,8 +358,8 @@ class BridgeIO(RobotIO):
 
     def set_torque(self, on: bool) -> None:
         if not on:
-            # All 14 joints at once: also clears a latched bridge fault.
-            self.bridge.torque(BRIDGE_IDS, False)
+            # Every served servo at once: also clears a latched bridge fault.
+            self.bridge.torque(self.served, False)
             return
         st = self.bridge.status()
         if st["fault"]:
@@ -395,7 +407,7 @@ class BridgeIO(RobotIO):
 
     def close(self) -> None:
         try:
-            self.bridge.torque(BRIDGE_IDS, False)
+            self.bridge.torque(self.served, False)
             if self.original_pd:  # leave the servos' RAM gains as we found them
                 time.sleep(0.05)
                 for i, pd in self.original_pd.items():

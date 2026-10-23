@@ -119,6 +119,7 @@ def _scan_bridge(args):
     from .bridge import ADDR_DIAG, ADDR_NPD, BRIDGE_IDS, Bridge, BridgeError, parse_diag
     from .calibration import BRIDGE_IDS as CAL_IDS
     name_of = {i: n for n, i in zip(JOINT_NAMES, CAL_IDS) if i}
+    name_of.setdefault(15, "mouth")
     b = Bridge(_port(args))
     try:
         st = b.status()
@@ -129,8 +130,11 @@ def _scan_bridge(args):
               f"incomplete polls {st['incomplete_polls']}  bad frames {st['bad_frames']}")
         npd = b.read(1, ADDR_NPD, 16)
         print(f"  NPD1 (native P/D): {'yes' if npd[:4] == b'NPD1' else 'NO — flash MicroDuck_XGO_r1 firmware'}")
-        diag = {i: parse_diag(d) for i, d in b.sync_read(ADDR_DIAG, 32, BRIDGE_IDS).items()}
-        for i in BRIDGE_IDS:
+        served = b.served_ids()
+        print(f"  bridge serves IDs {served}" + ("  (mouth firmware)" if 15 in served else
+              "  (no mouth: duck_runtime/esp32_bridge_patch/add_mouth.py adds ID 15)"))
+        diag = {i: parse_diag(d) for i, d in b.sync_read(ADDR_DIAG, 32, served).items()}
+        for i in served:
             d = diag[i]
             try:
                 pd = b.native(i, 50, 2)
@@ -204,7 +208,7 @@ def cmd_relax(args):
     from .bridge import BRIDGE_IDS, Bridge
     b = Bridge(_port(args))
     try:
-        b.torque(BRIDGE_IDS, False)
+        b.torque(b.served_ids(), False)
         time.sleep(0.05)
         st = b.status()
         print(f"torque mask 0x{st['torque_mask']:04x}  fault {st['fault']} ({st['fault_name']})")
@@ -258,7 +262,7 @@ def cmd_step_test(args):
             log.append((time.monotonic() - t0, diag()["raw"]))
             time.sleep(0.002)  # the bridge refreshes feedback every ~6-10 ms anyway
     finally:
-        b.torque(BRIDGE_IDS, False)
+        b.torque(b.served_ids(), False)
         time.sleep(0.05)
         try:
             b.npd(i, pd0[0], pd0[1])
@@ -307,8 +311,11 @@ def cmd_zero(args):
     cal = Calibration.load(args.calib)
     io = open_io(args, cal)
     io.set_torque(False)
-    print(cmd_zero.__doc__)
-    input("Pose the robot, then press Enter to record...")
+    if args.joints == "mouth":
+        input("用手把嘴完全闭上（闭合位置记为 -5 度），按回车记录…")
+    else:
+        print(cmd_zero.__doc__)
+        input("Pose the robot, then press Enter to record...")
     samples, grav = [], []
     for _ in range(45):  # also warms the IMU decoder; trunk attitude tells whether the pose was level
         s_ = io.read()
@@ -332,6 +339,25 @@ def cmd_zero(args):
     cal.save(args.calib)
     io.close()
     print(f"saved {args.calib}. Next: direction check.")
+
+
+def cmd_mouth(args):
+    """Add the mouth servo to calib.json (after flashing the 15-servo bridge firmware,
+    esp32_bridge_patch/add_mouth.py): set its ID, find its direction (open = +), record
+    its zero with the mouth closed. Torque stays off throughout."""
+    cal = Calibration.load(args.calib)
+    j = cal.joints[MOUTH_INDEX]
+    if j.id and j.id != args.id:
+        print(f"mouth was ID {j.id}; now {args.id}")
+    j.id, j.calibrated = args.id, False
+    cal.save(args.calib)
+    print(f"mouth = ID {args.id} in {args.calib}")
+    args.joints = "mouth"
+    cmd_direction(args)
+    if not Calibration.load(args.calib).joints[MOUTH_INDEX].calibrated:
+        raise SystemExit("嘴的方向没测出来：重跑 tools mouth")
+    cmd_zero(args)
+    print("嘴标定完成。网页中控的「张嘴」滑条 / 终端按 m 可以开合。")
 
 
 def cmd_direction(args):
@@ -830,7 +856,7 @@ def main(argv=None):
                      ("live", cmd_live), ("zero", cmd_zero),
                      ("direction", cmd_direction), ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test),
                      ("trim", cmd_trim), ("hip-roll", cmd_hip_roll), ("imu-snap", cmd_imu_snap),
-                     ("pose-check", cmd_pose_check), ("sign-test", cmd_sign_test)]:
+                     ("pose-check", cmd_pose_check), ("sign-test", cmd_sign_test), ("mouth", cmd_mouth)]:
         p = sub.add_parser(name)
         add_robot_args(p)
         if name not in ("scan", "relax", "step-test"):
@@ -843,6 +869,8 @@ def main(argv=None):
         if name == "trim":
             p.add_argument("--target", type=float, default=None,
                            help=f"stance pitch to trim to, deg (+ = nose down); default {HOME_STAND_PITCH_DEG}")
+        if name == "mouth":
+            p.add_argument("--id", type=int, default=15, help="mouth servo bus ID")
         if name == "home-test":
             p.add_argument("--head-cmd", default="0,0,0,0",
                            help="neck_pitch,head_pitch,head_yaw,head_roll offsets from HOME, degrees")

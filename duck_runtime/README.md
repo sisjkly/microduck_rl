@@ -100,6 +100,20 @@ duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0
 - 同一时间只能有一个程序占用舵机：用网页时不要再开 `duck_runtime.run`。
 - 在电脑上试：`uv run python -m duck_runtime.dashboard --backend sim --set policies --supply robot`，打开 http://localhost:8000 。
 
+### 嘴（第 15 个舵机，ID 15）
+
+ESP32 桥接固件原本只管 ID 1–14，嘴的舵机从来没被读写过。三步接上：
+
+1. **改固件并重刷**（在保存着之前烧录用草图的电脑上）：
+   `python3 duck_runtime/esp32_bridge_patch/add_mouth.py /你的草图路径/microduck_esp32_bridge`
+   只改 `bridge_config.h`：舵机数 14→15，加入 ID 15，掩码 0x7FFF；原来 1–14 的配置原样保留，旧文件备份为
+   `bridge_config.h.before_mouth`。然后照之前的设置烧录（ESP32S3 Dev Module、USB CDC On Boot = Enabled、原生 USB 口）。
+2. **鸭子上**：`duck duck_runtime.tools scan` 应显示 `bridge serves IDs [1..15] (mouth firmware)`，ID 15 mode 4。
+3. **标定嘴**：`duck duck_runtime.tools mouth --calib calib.json`：写入 ID 15 → 用手把嘴张开测方向 → 闭上嘴记零位（闭合 = -5°）。
+
+之后网页中控「张嘴」滑条（-5° 闭 … 30°）或键 `m` 开合；终端版也是 `m`。嘴不是策略的关节，开合不影响走路。
+旧固件 + 嘴未标定的 `calib.json` 照常工作；`calib.json` 写了 ID 15 但固件没刷，会提示先刷固件。
+
 ### 3. 官方策略集（坐下/站起、捡东西、踢球、翻滚）
 
 `--set` 读官方 Hub 仓库 `pollen-robotics/microduck-policies` 的 `manifest.json`（schema 2），
