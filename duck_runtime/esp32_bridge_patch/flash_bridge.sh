@@ -20,12 +20,26 @@ if pgrep -f "[d]uck_runtime\.(run|dashboard|tools)" >/dev/null; then
 fi
 sudo systemctl stop microduck-gamepad.service 2>/dev/null || true
 
-if ! "$PY" -m esptool version >/dev/null 2>&1; then
-  echo "installing esptool into $(dirname "$(dirname "$PY")")"
-  "$PY" -m pip install -q "esptool==4.8.1"
+# esptool: one already on PATH, else a small venv of its own (the robot venv is uv-made, no pip).
+ESPTOOL=""
+for c in esptool esptool.py; do command -v "$c" >/dev/null 2>&1 && { ESPTOOL="$c"; break; }; done
+if [ -z "$ESPTOOL" ]; then
+  EV="$HOME/.local/share/duck-esptool"
+  if [ ! -x "$EV/bin/esptool.py" ] && [ ! -x "$EV/bin/esptool" ]; then
+    echo "installing esptool into $EV"
+    if python3 -m venv "$EV" 2>/dev/null; then
+      "$EV/bin/python" -m pip install -q "esptool==4.8.1"
+    elif command -v uv >/dev/null 2>&1; then
+      uv venv -q "$EV" && uv pip install -q --python "$EV/bin/python" "esptool==4.8.1"
+    else
+      echo "cannot make a venv: run  sudo apt install -y python3-venv  (or  sudo apt install -y esptool ) and retry"
+      exit 1
+    fi
+  fi
+  ESPTOOL="$EV/bin/esptool.py"; [ -x "$ESPTOOL" ] || ESPTOOL="$EV/bin/esptool"
 fi
 
-"$PY" -m esptool --chip esp32s3 --port "$PORT" --baud 921600 \
+"$ESPTOOL" --chip esp32s3 --port "$PORT" --baud 921600 \
   --before default_reset --after hard_reset write_flash 0x0 "$BIN"
 
 echo "waiting for the bridge to come back on $PORT..."
