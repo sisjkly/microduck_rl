@@ -104,10 +104,14 @@ duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0
 
 ESP32 桥接固件原本只管 ID 1–14，嘴的舵机从来没被读写过。三步接上：
 
-1. **改固件并重刷**（在保存着之前烧录用草图的电脑上）：
-   `python3 duck_runtime/esp32_bridge_patch/add_mouth.py /你的草图路径/microduck_esp32_bridge`
-   只改 `bridge_config.h`：舵机数 14→15，加入 ID 15，掩码 0x7FFF；原来 1–14 的配置原样保留，旧文件备份为
-   `bridge_config.h.before_mouth`。然后照之前的设置烧录（ESP32S3 Dev Module、USB CDC On Boot = Enabled、原生 USB 口）。
+1. **改固件并重刷**，两种方式任选：
+   - **从 Pi 直接刷（SSH 里就行，不用拔线）**：把编译好的镜像 `bridge_mouth15.bin` 拷到鸭子上，然后
+     `bash duck_runtime/esp32_bridge_patch/flash_bridge.sh bridge_mouth15.bin`。脚本会停掉占串口的服务、
+     装 esptool、通过 ESP32-S3 自带的 USB 口自动进下载模式写入，最后打印桥服务的 ID。回退用 `bridge_stock14.bin`。
+     镜像用 Arduino-ESP32 3.0.7 编译：ESP32S3 Dev Module、USB CDC On Boot = Enabled、Hardware CDC and JTAG、4 MB DIO。
+   - **在电脑上用 Arduino IDE**：`python3 duck_runtime/esp32_bridge_patch/add_mouth.py /你的草图路径/microduck_esp32_bridge`
+     （只改 `bridge_config.h`：舵机数 14→15，加入 ID 15，掩码 0x7FFF；原来 1–14 的配置原样保留，旧文件备份为
+     `bridge_config.h.before_mouth`），再照之前的设置烧录。
 2. **鸭子上**：`duck duck_runtime.tools scan` 应显示 `bridge serves IDs [1..15] (mouth firmware)`，ID 15 mode 4。
 3. **标定嘴**：`duck duck_runtime.tools mouth --calib calib.json`：写入 ID 15 → 用手把嘴张开测方向 → 闭上嘴记零位（闭合 = -5°）。
 
