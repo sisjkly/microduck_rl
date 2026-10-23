@@ -54,6 +54,26 @@ class TickLog:
     voltages: np.ndarray | None = None   # V per servo (bridge): sag under load slows big moves
 
 
+# Ground pick beak, scripted on the training phases (microduck_ground_pick_env_cfg.py:
+# descent 0-0.375, hold at the bottom 0.375-0.425, rise with a payload at the beak after).
+# The policy has no mouth output and robotd never opens it during a pick; this is ours.
+PICK_MOUTH_OPEN = math.radians(25.0)
+
+
+def pick_mouth(phase: float) -> float:
+    """Beak target (rad) at ground-pick phase: open on the way down, close at the bottom."""
+    closed, opened = MOUTH_CLOSED, PICK_MOUTH_OPEN
+    if phase < 0.10:
+        return closed
+    if phase < 0.30:                      # open while descending
+        return closed + (opened - closed) * (phase - 0.10) / 0.20
+    if phase < 0.375:
+        return opened
+    if phase < 0.425:                     # bite during the hold at the bottom
+        return opened + (closed - opened) * (phase - 0.375) / 0.05
+    return closed
+
+
 @dataclass
 class _Move:
     skill: Skill
@@ -117,6 +137,8 @@ class Runner:
         # Mouth (not a policy joint): held here, applied to every target. Moves only on a
         # build whose calibration gives the mouth a servo ID.
         self.mouth_target = MOUTH_CLOSED
+        self.pick_mouth = True               # script the beak during a ground pick (if it has a servo)
+        self._mouth_override: float | None = None
 
     def _clear_moves(self) -> None:
         self.move: _Move | None = None
@@ -243,6 +265,7 @@ class Runner:
                 self.refusal = f"link lost: {err}; reconnect failed: {e}"
 
     def tick(self) -> Sensors:
+        self._mouth_override = None          # set again below while a ground pick runs
         try:
             s = self.io.read()
         except (RuntimeError, OSError) as e:
@@ -304,7 +327,7 @@ class Runner:
 
         self.last_sensors = s
         if targets is not None:
-            targets[MOUTH_INDEX] = self.mouth_target
+            targets[MOUTH_INDEX] = self.mouth_target if self._mouth_override is None else self._mouth_override
             targets = self.safety.clamp(targets)
             self.io.write(targets)
             self.last_targets = targets
@@ -369,6 +392,8 @@ class Runner:
             if sk.encoding == "phase":
                 ang = 2 * math.pi * self.move.elapsed / sk.period_s
                 twist = (math.cos(ang), math.sin(ang), 0.0)
+                if self.pick_mouth:
+                    self._mouth_override = pick_mouth(self.move.elapsed / sk.period_s)
             else:
                 twist = sk.unwind if self.move.unwinding else sk.twist
             cmd, policy, scale = Command(twist=twist), sk.policy, sk.action_scale

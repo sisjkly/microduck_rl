@@ -267,3 +267,23 @@ def test_getup_ignores_footfalls_moves_and_robots_already_down(tmp_path):
     io.gravity = np.array([math.sin(tilt), 0.0, -math.cos(tilt)])
     drive(r, 20)
     assert r.fall_seq is None
+
+
+def test_ground_pick_scripts_the_beak_then_hands_it_back(tmp_path):
+    from duck_runtime.contract import MOUTH_CLOSED, MOUTH_INDEX
+    from duck_runtime.runner import PICK_MOUTH_OPEN
+    r, nets, io = running(tmp_path)
+    r.mouth_target = math.radians(10)                      # whatever the user had set
+    assert r.trigger("ground_pick") is None
+    mouth = []
+    for _ in range(140):
+        drive(r, 1)
+        mouth.append(io.written[-1][MOUTH_INDEX])
+    mouth = np.degrees(mouth)
+    k = lambda phase: int(round(phase * 4.0 / 0.02))       # tick of a phase (period 4 s)
+    assert mouth[k(0.05)] == pytest.approx(np.degrees(MOUTH_CLOSED))
+    assert mouth[k(0.35)] == pytest.approx(np.degrees(PICK_MOUTH_OPEN))   # open at the bottom
+    assert mouth[k(0.50)] == pytest.approx(np.degrees(MOUTH_CLOSED))      # bitten, closed rising
+    assert np.all(np.diff(mouth[:k(0.30)]) >= -1e-9)
+    drive(r, 2)
+    assert np.degrees(io.written[-1][MOUTH_INDEX]) == pytest.approx(10.0)   # back to the user's
