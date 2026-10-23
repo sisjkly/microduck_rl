@@ -42,17 +42,26 @@ fi
 "$ESPTOOL" --chip esp32s3 --port "$PORT" --baud 921600 \
   --before default_reset --after hard_reset write_flash 0x0 "$BIN"
 
-echo "waiting for the bridge to come back on $PORT..."
-for _ in $(seq 1 40); do [ -e "$PORT" ] && break; sleep 0.25; done
-sleep 1
+echo "waiting for the bridge to boot on $PORT..."
+sleep 2
 cd "$(dirname "$0")/../.."
 "$PY" - "$PORT" <<'EOF'
-import sys
-from duck_runtime.bridge import Bridge
-b = Bridge(sys.argv[1])
-try:
-    st = b.status()
-    print(f"bridge up: MDK2 v{st['version']}, serves IDs {b.served_ids()}, fault {st['fault']} ({st['fault_name']})")
-finally:
-    b.close()
+import sys, time
+from duck_runtime.bridge import Bridge, BridgeError
+last = None
+for attempt in range(20):                      # USB re-enumeration + boot can take a few seconds
+    try:
+        b = Bridge(sys.argv[1])
+        try:
+            st = b.status()
+            print(f"bridge up: MDK2 v{st['version']}, serves IDs {b.served_ids()}, fault {st['fault']} ({st['fault_name']})")
+            sys.exit(0)
+        finally:
+            b.close()
+    except (BridgeError, OSError) as e:
+        last = e
+        time.sleep(0.5)
+print(f"bridge not answering after 10 s ({last}). Unplug/replug the ESP32 USB (or power-cycle the robot), "
+      "then: duck duck_runtime.tools scan")
+sys.exit(1)
 EOF
