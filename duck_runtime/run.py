@@ -58,8 +58,8 @@ class Keys:
         return out.decode(errors="ignore")
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def add_runner_args(ap: argparse.ArgumentParser) -> None:
+    """Robot / policy / safety options shared by the terminal driver and the dashboard."""
     ap.add_argument("--backend", choices=["bridge", "feetech", "sim"], default="bridge")
     ap.add_argument("--policy", help="61->14 ONNX gait (e.g. official velstand.onnx); with --set: overrides its walk slot")
     ap.add_argument("--set", dest="policy_set", help="directory with the official set's manifest.json + .onnx "
@@ -76,25 +76,27 @@ def main(argv=None):
     ap.add_argument("--echo", choices=["auto", "yes", "no"], default="auto", help="feetech only")
     ap.add_argument("--imu-port", default=None, help="feetech only: ESP32 IMU link port")
     ap.add_argument("--calib")
-    ap.add_argument("--viewer", action="store_true", help="sim only")
     ap.add_argument("--keep-on-fall", action="store_true",
                     help="keep driving after a fall so velstand v8 gets the robot up (official default); "
                          "also lets 2 start the policy with the robot on the floor")
     ap.add_argument("--getup-timeout", type=float, default=5.0,
                     help="with --keep-on-fall: limp if still down after this many seconds (0 = never)")
-    ap.add_argument("--log", help="write an .npz log of every tick on exit")
+    ap.add_argument("--supply", choices=["ideal", "robot", "robot-full"], default="ideal",
+                    help="sim only: battery sag model (robot = this robot's measured sag)")
     ap.add_argument("--head-cmd", default="0,0,0,0",
                     help="head pose command, degrees from HOME: neck_pitch,head_pitch,head_yaw,head_roll "
                          "(also used for the stand pose before the policy starts)")
-    args = ap.parse_args(argv)
 
+
+def build_runner(args, ap: argparse.ArgumentParser):
+    """-> (runner, io, policy set or None, {key: skill name}, head offset) from parsed args."""
     tuning = Tuning.official() if args.tuning == "official" else Tuning.as_trained()
     if args.action_scale is not None:
         tuning.action_scale = args.action_scale
 
     if args.backend == "sim":
-        from .sim_io import SimIO
-        io = SimIO()
+        from .sim_io import SUPPLY_PRESETS, SimIO
+        io = SimIO(**SUPPLY_PRESETS[getattr(args, "supply", "ideal")])
         safety = Safety()
     else:
         from .calibration import Calibration
@@ -106,7 +108,7 @@ def main(argv=None):
         io = open_io(args, cal)
         safety = Safety(cal.limits())
 
-    log: list[TickLog] | None = [] if args.log else None
+    log: list[TickLog] | None = [] if getattr(args, "log", None) else None
     head = tuple(math.radians(float(v)) for v in args.head_cmd.split(","))
     if len(head) != 4:
         ap.error("--head-cmd needs 4 values")
@@ -128,6 +130,28 @@ def main(argv=None):
     runner = Runner(io, Controller(walk, tuning), safety,
                     on_fall="keep" if args.keep_on_fall else "limp", log=log, head_offset=head,
                     policies=pset, getup_timeout_s=args.getup_timeout or None)
+    return runner, io, pset, skill_keys, head
+
+
+def save_log(path: str, log: list[TickLog]) -> None:
+    np.savez_compressed(path, t=[r.t for r in log], state=[r.state for r in log],
+                        obs=np.array([np.full(61, np.nan) if r.obs is None else r.obs for r in log]),
+                        targets=np.array([np.full(15, np.nan) if r.targets is None else r.targets for r in log]),
+                        positions=np.array([r.positions for r in log]),
+                        gravity=np.array([r.gravity for r in log]), gyro=np.array([r.gyro for r in log]),
+                        currents=np.array([np.full(15, np.nan) if r.currents is None else r.currents for r in log]),
+                        mode=[r.mode for r in log],
+                        voltages=np.array([np.full(15, np.nan) if r.voltages is None else r.voltages for r in log]))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_runner_args(ap)
+    ap.add_argument("--viewer", action="store_true", help="sim only")
+    ap.add_argument("--log", help="write an .npz log of every tick on exit")
+    args = ap.parse_args(argv)
+    runner, io, pset, skill_keys, head = build_runner(args, ap)
+    log = runner.log
     viewer = None
     if args.viewer and args.backend == "sim" and os.environ.get("DISPLAY"):
         import mujoco.viewer
@@ -185,14 +209,7 @@ def main(argv=None):
         runner.limp()
         io.close()
         if log:
-            np.savez_compressed(args.log, t=[r.t for r in log], state=[r.state for r in log],
-                                obs=np.array([np.full(61, np.nan) if r.obs is None else r.obs for r in log]),
-                                targets=np.array([np.full(15, np.nan) if r.targets is None else r.targets for r in log]),
-                                positions=np.array([r.positions for r in log]),
-                                gravity=np.array([r.gravity for r in log]), gyro=np.array([r.gyro for r in log]),
-                                currents=np.array([np.full(15, np.nan) if r.currents is None else r.currents for r in log]),
-                                mode=[r.mode for r in log],
-                                voltages=np.array([np.full(15, np.nan) if r.voltages is None else r.voltages for r in log]))
+            save_log(args.log, log)
             print(f"\nlog -> {args.log}")
 
 

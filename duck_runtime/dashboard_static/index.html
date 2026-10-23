@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Microduck 中控</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --ink: #1d2128; --muted: #6b7280; --line: #e3e6ea;
+  --accent: #2563eb; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --run: #15803d; --idle: #64748b;
+  --chip: #eef1f5; --btn: #f1f3f6; --btn-ink: #1d2128; --track: #dfe3e8;
+  --c1: #e4572e; --c2: #2f80c9; --c3: #7a5195; --c4: #2a9d8f;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1216; --panel: #171b21; --ink: #e6e8eb; --muted: #8b939e; --line: #262c35;
+    --accent: #5b8def; --ok: #4ade80; --warn: #f59e0b; --bad: #f87171; --run: #4ade80; --idle: #94a3b8;
+    --chip: #20262e; --btn: #222831; --btn-ink: #e6e8eb; --track: #2c333d;
+    --c1: #ff7a52; --c2: #5aa9f0; --c3: #b28ae0; --c4: #4cc9b8;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1216; --panel: #171b21; --ink: #e6e8eb; --muted: #8b939e; --line: #262c35;
+  --accent: #5b8def; --ok: #4ade80; --warn: #f59e0b; --bad: #f87171; --run: #4ade80; --idle: #94a3b8;
+  --chip: #20262e; --btn: #222831; --btn-ink: #e6e8eb; --track: #2c333d;
+  --c1: #ff7a52; --c2: #5aa9f0; --c3: #b28ae0; --c4: #4cc9b8;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 16px; margin: 0 6px 0 0; letter-spacing: .2px; }
+header .host { color: var(--muted); font-size: 12px; margin-right: auto; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
+  background: var(--chip); font-size: 12px; white-space: nowrap; }
+.chip b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
+.dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+.estop { border: 0; border-radius: 8px; padding: 8px 16px; font-weight: 700; font-size: 14px; cursor: pointer;
+  background: #dc2626; color: #fff; box-shadow: 0 1px 0 rgba(0,0,0,.15); }
+.estop:active { transform: translateY(1px); }
+main { display: grid; gap: 12px; padding: 12px 16px 24px; grid-template-columns: 330px minmax(0, 1fr) 460px; }
+@media (max-width: 1280px) { main { grid-template-columns: 320px minmax(0, 1fr); } .col3 { grid-column: 1 / -1; } }
+@media (max-width: 820px) { main { grid-template-columns: minmax(0, 1fr); padding: 10px 16px; } }
+.col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.card h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); font-weight: 600; letter-spacing: .3px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+button.b { flex: 1 1 0; min-width: 0; border: 1px solid var(--line); background: var(--btn); color: var(--btn-ink);
+  border-radius: 8px; padding: 8px 6px; cursor: pointer; font: inherit; font-weight: 600; position: relative; overflow: hidden; }
+button.b:hover:not(:disabled) { border-color: var(--accent); }
+button.b:disabled { opacity: .4; cursor: not-allowed; }
+button.b.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.b .k { font-family: var(--mono); font-weight: 500; font-size: 11px; opacity: .65; margin-left: 4px; }
+button.b .prog { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--ok); width: 0; }
+.slider { display: grid; grid-template-columns: 84px minmax(0, 1fr) 58px; align-items: center; gap: 8px; margin: 6px 0; }
+.slider label { font-size: 12px; color: var(--muted); }
+.slider output { font-family: var(--mono); font-size: 12px; text-align: right; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+select, input[type=number] { font: inherit; background: var(--btn); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 6px; }
+.kv { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.kv div { background: var(--chip); border-radius: 8px; padding: 6px 8px; }
+.kv span { display: block; font-size: 11px; color: var(--muted); }
+.kv b { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+.att { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 14px; align-items: center; }
+@media (max-width: 480px) { .att { grid-template-columns: minmax(0, 1fr); justify-items: center; } }
+.att svg { width: 170px; height: 170px; }
+.legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+.chart { position: relative; margin-bottom: 10px; }
+.chart .ttl { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 2px; }
+.chart .ttl b { font-size: 12px; }
+.chart canvas { width: 100%; height: 110px; display: block; }
+.tablewrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 4px 6px; text-align: right; white-space: nowrap; }
+th { font-size: 11px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); }
+td { font-family: var(--mono); font-size: 12px; border-bottom: 1px solid var(--line); }
+td.name, th.name { text-align: left; font-family: inherit; }
+td.name small { color: var(--muted); margin-left: 4px; font-family: var(--mono); }
+tr.group td { font-family: inherit; color: var(--muted); font-size: 11px; font-weight: 600; text-align: left;
+  background: var(--chip); border-bottom: 0; }
+.w { color: var(--warn); font-weight: 700; } .x { color: var(--bad); font-weight: 700; }
+.bar { position: relative; height: 6px; background: var(--track); border-radius: 3px; width: 70px; display: inline-block; vertical-align: middle; }
+.bar i { position: absolute; top: -2px; width: 3px; height: 10px; border-radius: 1px; background: var(--accent); }
+.bar u { position: absolute; top: -2px; width: 3px; height: 10px; border-radius: 1px; background: var(--muted); opacity: .6; }
+.events { max-height: 220px; overflow-y: auto; font-size: 12px; }
+.events div { padding: 3px 0; border-bottom: 1px dashed var(--line); display: flex; gap: 8px; }
+.events time { color: var(--muted); font-family: var(--mono); flex: none; }
+.events .warn { color: var(--warn); } .events .error { color: var(--bad); }
+.logs a { color: var(--accent); text-decoration: none; font-family: var(--mono); font-size: 12px; }
+.logs div { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--line); font-size: 12px; }
+.logs span { color: var(--muted); }
+.banner { display: none; margin: 10px 16px 0; padding: 8px 12px; border-radius: 8px; background: #fef3c7; color: #78350f; font-size: 13px; }
+.banner.show { display: block; }
+.muted { color: var(--muted); font-size: 12px; }
+.refusal { min-height: 18px; font-size: 12px; color: var(--warn); margin-top: 6px; }
+details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin: 6px 0; }
+.keys { font-size: 11px; color: var(--muted); line-height: 1.6; }
+.keys kbd { font-family: var(--mono); background: var(--chip); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Microduck 中控</h1>
+  <span class="host" id="host">连接中…</span>
+  <span class="chip"><span class="dot" id="linkDot"></span><b id="link">离线</b></span>
+  <span class="chip"><span class="dot" id="stateDot"></span><b id="state">—</b></span>
+  <span class="chip">电池 <b id="hdrV">—</b></span>
+  <span class="chip">电流 <b id="hdrI">—</b></span>
+  <span class="chip">最高温 <b id="hdrT">—</b></span>
+  <span class="chip">控制 <b id="hdrHz">—</b></span>
+  <span class="chip">摔倒 <b id="hdrFalls">0</b></span>
+  <button class="estop" id="estop" title="卸力（键 0）">卸力 0</button>
+</header>
+<div class="banner" id="banner"></div>
+<main>
+  <section class="col col1">
+    <div class="card">
+      <h2>电源 / 策略</h2>
+      <div class="row">
+        <button class="b" data-act="enable">上力矩<span class="k">1</span></button>
+        <button class="b primary" data-act="start">启动<span class="k">2</span></button>
+        <button class="b" data-act="stop">停止<span class="k">3</span></button>
+      </div>
+      <div class="refusal" id="refusal"></div>
+    </div>
+    <div class="card">
+      <h2>速度指令 <button class="b" id="zero" style="flex:none;padding:3px 10px;font-size:12px">清零<span class="k">空格</span></button></h2>
+      <div class="slider"><label>前后 vx</label><input type="range" id="vx" min="-0.3" max="0.3" step="0.05" value="0"><output id="vxo">0.00</output></div>
+      <div class="slider"><label>左右 vy</label><input type="range" id="vy" min="-0.2" max="0.2" step="0.05" value="0"><output id="vyo">0.00</output></div>
+      <div class="slider"><label>转向 wz</label><input type="range" id="wz" min="-1" max="1" step="0.1" value="0"><output id="wzo">0.0</output></div>
+      <div class="muted" id="cmdEcho">机器人收到：—</div>
+      <details>
+        <summary>头部姿态（相对 HOME，度）</summary>
+        <div class="slider"><label>neck_pitch</label><input type="range" class="head" data-i="0" min="-60" max="60" step="1" value="0"><output>0</output></div>
+        <div class="slider"><label>head_pitch</label><input type="range" class="head" data-i="1" min="-60" max="60" step="1" value="0"><output>0</output></div>
+        <div class="slider"><label>head_yaw</label><input type="range" class="head" data-i="2" min="-60" max="60" step="1" value="0"><output>0</output></div>
+        <div class="slider"><label>head_roll</label><input type="range" class="head" data-i="3" min="-60" max="60" step="1" value="0"><output>0</output></div>
+      </details>
+    </div>
+    <div class="card">
+      <h2>动作</h2>
+      <div class="row" id="moves"></div>
+      <div class="muted" id="movesNote" style="margin-top:6px"></div>
+    </div>
+    <div class="card">
+      <h2>安全</h2>
+      <div class="slider" style="grid-template-columns: 110px minmax(0,1fr)">
+        <label>摔倒后</label>
+        <select id="onFall"><option value="limp">卸力</option><option value="keep">继续驱动，让它自己爬起来</option></select>
+      </div>
+      <div class="slider" style="grid-template-columns: 110px minmax(0,1fr)">
+        <label>爬不起来时</label>
+        <span style="white-space:nowrap"><input type="number" id="getup" min="0" max="30" step="1" style="width:56px"> 秒后卸力（0 = 不限）</span>
+      </div>
+      <div class="keys">键盘：<kbd>1</kbd> 上力矩 <kbd>2</kbd> 启动 <kbd>3</kbd> 停止 <kbd>0</kbd> 卸力 ·
+        <kbd>w</kbd>/<kbd>s</kbd> 前后 <kbd>z</kbd>/<kbd>c</kbd> 左右 <kbd>a</kbd>/<kbd>d</kbd> 转向 <kbd>空格</kbd> 清零 ·
+        <kbd>x</kbd> 坐/站 <kbd>g</kbd> 捡 <kbd>k</kbd>/<kbd>l</kbd> 踢 <kbd>r</kbd> 翻滚</div>
+    </div>
+  </section>
+
+  <section class="col col2">
+    <div class="card">
+      <h2>姿态 <span class="muted" id="imuReady"></span></h2>
+      <div class="att">
+        <svg viewBox="-100 -100 200 200" aria-label="姿态仪">
+          <defs><clipPath id="clipc"><circle r="92"/></clipPath></defs>
+          <g clip-path="url(#clipc)">
+            <g id="horizon">
+              <rect x="-300" y="-300" width="600" height="300" fill="#5aa9e6"/>
+              <rect x="-300" y="0" width="600" height="300" fill="#a0784f"/>
+              <line x1="-300" x2="300" y1="0" y2="0" stroke="#fff" stroke-width="2"/>
+              <g stroke="#fff" stroke-width="1.2" id="ladder"></g>
+            </g>
+          </g>
+          <circle r="92" fill="none" stroke="var(--line)" stroke-width="4"/>
+          <path d="M-46 0 H-16 L-8 8 L0 0 L8 8 L16 0 H46" fill="none" stroke="#facc15" stroke-width="4" stroke-linejoin="round"/>
+          <circle r="3" fill="#facc15"/>
+        </svg>
+        <div>
+          <div class="kv">
+            <div><span>俯仰（+低头）</span><b id="pitch">—</b></div>
+            <div><span>横滚</span><b id="roll">—</b></div>
+            <div><span>策略输出 max</span><b id="amax">—</b></div>
+            <div><span>角速度 x</span><b id="gx">—</b></div>
+            <div><span>角速度 y</span><b id="gy">—</b></div>
+            <div><span>角速度 z</span><b id="gz">—</b></div>
+          </div>
+          <div class="muted" style="margin-top:8px" id="modeLine">—</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>实时曲线（最近 20 秒）</h2>
+      <div class="chart"><div class="ttl"><b>躯干姿态（°）</b><span class="legend"><span><i style="background:var(--c1)"></i>俯仰</span><span><i style="background:var(--c2)"></i>横滚</span></span></div><canvas id="chAtt"></canvas></div>
+      <div class="chart"><div class="ttl"><b>供电</b><span class="legend"><span><i style="background:var(--c4)"></i>最低电压 V</span><span><i style="background:var(--c3)"></i>总电流 A（右轴）</span></span></div><canvas id="chPow"></canvas></div>
+      <div class="chart"><div class="ttl"><b>策略输出 max |a|</b><span class="legend"><span><i style="background:var(--c3)"></i>|a|</span></span></div><canvas id="chAct"></canvas></div>
+      <div class="chart"><div class="ttl"><b>控制周期（ms）</b><span class="legend"><span><i style="background:var(--c2)"></i>最长周期</span></span></div><canvas id="chLoop"></canvas></div>
+    </div>
+  </section>
+
+  <section class="col col3">
+    <div class="card">
+      <h2>关节 <span class="muted">角度为相对 HOME，度</span></h2>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th class="name">关节</th><th>位置</th><th>目标</th><th>误差</th><th>速度</th><th>电流 mA</th><th>电压</th><th>温度</th><th>范围</th></tr></thead>
+          <tbody id="joints"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <h2>记录 <button class="b" id="rec" style="flex:none;padding:3px 12px;font-size:12px">开始记录</button></h2>
+      <div class="muted" id="recLine">未在记录。日志存到机器人上的 logs/，字段和 --log 一样。</div>
+      <div class="logs" id="logs" style="margin-top:6px"></div>
+    </div>
+    <div class="card">
+      <h2>事件</h2>
+      <div class="events" id="events"></div>
+    </div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+let token = params.get("token");
+try { if (token) localStorage.setItem("duckToken", token); else token = localStorage.getItem("duckToken"); } catch (e) {}
+if (params.has("token")) history.replaceState(null, "", location.pathname);
+
+let info = null, frame = null, lastFrameAt = 0, lastEventSeq = 0;
+const cmd = { vx: 0, vy: 0, wz: 0, head: [0, 0, 0, 0] };
+const LIM = { vx: 0.3, vy: 0.2, wz: 1.0 };
+const GROUPS = [["左腿", [0, 1, 2, 3, 4]], ["脖子 / 头", [5, 6, 7, 8]], ["右腿", [10, 11, 12, 13, 14]]];
+
+function banner(msg) { const b = $("banner"); b.textContent = msg || ""; b.classList.toggle("show", !!msg); }
+async function post(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Duck-Token": token || "" },
+      body: JSON.stringify(body) });
+    const j = await r.json();
+    if (r.status === 403) banner("没有控制权限：请用机器人终端上打印的带 token 的地址打开本页。");
+    else if (!j.ok && j.error) $("refusal").textContent = j.error;
+    else if (j.ok) $("refusal").textContent = "";
+    return j;
+  } catch (e) { $("refusal").textContent = "请求失败：" + e; return { ok: false }; }
+}
+const act = (a, extra) => post("/api/action", Object.assign({ action: a }, extra || {}));
+
+// ---------- controls ----------
+document.querySelectorAll("[data-act]").forEach((b) => b.onclick = () => act(b.dataset.act));
+$("estop").onclick = () => act("limp");
+function setAxis(k, v) {
+  v = Math.max(-LIM[k], Math.min(LIM[k], Math.round(v * 100) / 100));
+  cmd[k] = v; $(k).value = v; $(k + "o").textContent = v.toFixed(k === "wz" ? 1 : 2);
+  sendCmd();
+}
+["vx", "vy", "wz"].forEach((k) => $(k).oninput = () => setAxis(k, parseFloat($(k).value)));
+document.querySelectorAll("input.head").forEach((el) => el.oninput = () => {
+  cmd.head[+el.dataset.i] = +el.value; el.nextElementSibling.textContent = el.value; sendCmd();
+});
+function zero() { ["vx", "vy", "wz"].forEach((k) => setAxis(k, 0)); }
+$("zero").onclick = zero;
+let sending = false;
+async function sendCmd() {
+  if (sending) return; sending = true;
+  try { await post("/api/command", cmd); } finally { sending = false; }
+}
+// Heartbeat: the robot zeroes the twist 0.5 s after the last command, so a closed tab stops it.
+setInterval(() => { if (document.visibilityState === "visible" && !(info && info.token_required && !token)) sendCmd(); }, 200);
+$("onFall").onchange = () => post("/api/settings", { on_fall: $("onFall").value });
+$("getup").onchange = () => post("/api/settings", { getup_timeout_s: parseFloat($("getup").value) || 0 });
+$("rec").onclick = async () => {
+  const on = !(frame && frame.recording && frame.recording.on);
+  const j = await post("/api/record", { on });
+  if (!on) loadLogs();
+  if (j.file) $("recLine").textContent = "已保存 " + j.file;
+};
+const KEYS = { "1": () => act("enable"), "2": () => act("start"), "3": () => act("stop"), "0": () => act("limp"),
+  w: () => setAxis("vx", cmd.vx + 0.05), s: () => setAxis("vx", cmd.vx - 0.05),
+  z: () => setAxis("vy", cmd.vy + 0.05), c: () => setAxis("vy", cmd.vy - 0.05),
+  a: () => setAxis("wz", cmd.wz + 0.2), d: () => setAxis("wz", cmd.wz - 0.2), " ": zero,
+  x: () => act("sit") };
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, select, textarea") && e.target.type !== "range") return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  const skill = info && info.policy.skills.find((s) => s.key === k);
+  if (KEYS[k]) { KEYS[k](); e.preventDefault(); }
+  else if (skill) { zero(); act("skill", { name: skill.name }); e.preventDefault(); }
+});
+
+// ---------- static info ----------
+function buildMoves() {
+  const box = $("moves"); box.innerHTML = "";
+  const p = info.policy;
+  if (p.sitstand) box.appendChild(moveBtn("坐下 / 站起", "x", () => act("sit"), "sit"));
+  p.skills.forEach((s) => box.appendChild(moveBtn(`${s.name} ${s.duration_s.toFixed(1)}s`, s.key,
+    () => { zero(); act("skill", { name: s.name }); }, s.name)));
+  if (!p.sitstand && !p.skills.length) $("movesNote").textContent = "用 --set policies 启动才有坐站和各种动作。";
+  else $("movesNote").textContent = "踢腿和翻滚在电池电压低时容易摔，先在软垫上试。";
+}
+function moveBtn(label, key, fn, id) {
+  const b = document.createElement("button"); b.className = "b"; b.dataset.move = id;
+  b.innerHTML = `${label}${key ? `<span class="k">${key}</span>` : ""}<span class="prog"></span>`;
+  b.style.flex = "1 1 45%"; b.onclick = fn; return b;
+}
+function buildJoints() {
+  const tb = $("joints"); tb.innerHTML = "";
+  GROUPS.forEach(([title, idx]) => {
+    const g = document.createElement("tr"); g.className = "group"; g.innerHTML = `<td colspan="9">${title}</td>`; tb.appendChild(g);
+    idx.forEach((j) => {
+      const J = info.joints[j];
+      const tr = document.createElement("tr"); tr.id = "j" + j;
+      tr.innerHTML = `<td class="name">${J.name}${J.id != null ? `<small>#${J.id}</small>` : ""}</td>` +
+        "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" +
+        `<td><span class="bar"><u></u><i></i></span></td>`;
+      tb.appendChild(tr);
+    });
+  });
+}
+function buildLadder() {
+  const g = $("ladder"); let s = "";
+  for (let d = -40; d <= 40; d += 10) { if (!d) continue; const y = -d * 2, w = d % 20 ? 14 : 26;
+    s += `<line x1="${-w}" x2="${w}" y1="${y}" y2="${y}"/><text x="${w + 4}" y="${y + 3}" fill="#fff" stroke="none" font-size="8">${d}</text>`; }
+  g.innerHTML = s;
+}
+async function loadInfo() {
+  info = await (await fetch("/api/info")).json();
+  $("host").textContent = `${info.host} · ${info.backend === "sim" ? "仿真" : "真机"} · 步态 ${info.policy.walk} · ${info.control_hz} Hz` +
+    (info.calib ? ` · ${info.calib}` : "");
+  $("onFall").value = info.on_fall; $("getup").value = info.getup_timeout_s || 0;
+  if (info.token_required && !token) banner("没有控制权限：请用机器人终端上打印的带 token 的地址打开本页。");
+  buildMoves(); buildJoints(); buildLadder();
+}
+async function loadLogs() {
+  const logs = await (await fetch("/api/logs")).json();
+  $("logs").innerHTML = logs.length ? logs.map((l) =>
+    `<div><a href="/logs/${encodeURIComponent(l.name)}" download>${l.name}</a><span>${(l.bytes / 1e6).toFixed(1)} MB · ${new Date(l.mtime * 1000).toLocaleString()}</span></div>`).join("")
+    : '<div><span>还没有记录</span></div>';
+}
+async function loadEvents() {
+  const ev = await (await fetch("/api/events?since=" + lastEventSeq)).json();
+  const box = $("events");
+  ev.forEach((e) => {
+    lastEventSeq = Math.max(lastEventSeq, e.seq);
+    const d = document.createElement("div");
+    d.innerHTML = `<time>${new Date(e.wall * 1000).toLocaleTimeString()}</time><span class="${e.level}"></span>`;
+    d.lastChild.textContent = e.message;
+    box.prepend(d);
+  });
+  while (box.children.length > 200) box.lastChild.remove();
+}
+
+// ---------- charts ----------
+class Strip {
+  constructor(canvas, series, opts) { this.c = canvas; this.series = series; this.o = Object.assign({ win: 20 }, opts || {}); this.data = []; }
+  push(t, vals) { this.data.push([t, ...vals]); const lo = t - this.o.win; while (this.data.length && this.data[0][0] < lo) this.data.shift(); }
+  range(cols) {
+    let lo = Infinity, hi = -Infinity;
+    for (const r of this.data) for (const i of cols) { const v = r[i + 1]; if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }
+    if (!isFinite(lo)) { lo = 0; hi = 1; }
+    if (this.o.min != null) lo = Math.min(lo, this.o.min);
+    if (this.o.max != null) hi = Math.max(hi, this.o.max);
+    if (hi - lo < (this.o.span || 1e-6)) { const m = (hi + lo) / 2, s = (this.o.span || 1) / 2; lo = m - s; hi = m + s; }
+    const pad = (hi - lo) * 0.08; return [lo - pad, hi + pad];
+  }
+  draw() {
+    const c = this.c, dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+    if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+    const x = c.getContext("2d"); x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, W, H);
+    const cs = getComputedStyle(document.documentElement), line = cs.getPropertyValue("--line"), muted = cs.getPropertyValue("--muted");
+    const L = 34, R = this.o.right ? 34 : 6, T = 4, B = 14, w = W - L - R, h = H - T - B;
+    if (!this.data.length) return;
+    const t1 = this.data[this.data.length - 1][0], t0 = t1 - this.o.win;
+    const X = (t) => L + (t - t0) / this.o.win * w;
+    const axes = [this.series.map((s, i) => i).filter((i) => !this.series[i].right), this.series.map((s, i) => i).filter((i) => this.series[i].right)];
+    const rng = axes.map((cols) => cols.length ? this.range(cols) : null);
+    x.font = "10px ui-monospace, Menlo, monospace"; x.fillStyle = muted; x.strokeStyle = line; x.lineWidth = 1;
+    const [lo, hi] = rng[0];
+    for (let k = 0; k <= 3; k++) { const v = lo + (hi - lo) * k / 3, y = T + h - (v - lo) / (hi - lo) * h;
+      x.beginPath(); x.moveTo(L, y); x.lineTo(L + w, y); x.stroke(); x.fillText(v.toFixed(Math.abs(hi - lo) < 5 ? 1 : 0), 2, y + 3);
+      if (rng[1]) { const v2 = rng[1][0] + (rng[1][1] - rng[1][0]) * k / 3; x.fillText(v2.toFixed(1), L + w + 4, y + 3); } }
+    if (lo < 0 && hi > 0) { const y0 = T + h - (0 - lo) / (hi - lo) * h; x.strokeStyle = muted; x.globalAlpha = .5; x.beginPath(); x.moveTo(L, y0); x.lineTo(L + w, y0); x.stroke(); x.globalAlpha = 1; }
+    for (let s = 0; s <= 20; s += 5) x.fillText(`-${20 - s}s`, X(t0 + s) - 10, H - 2);
+    this.series.forEach((s, i) => {
+      const r = rng[s.right ? 1 : 0]; x.strokeStyle = cs.getPropertyValue(s.color); x.lineWidth = 1.6; x.beginPath(); let pen = false;
+      for (const row of this.data) { const v = row[i + 1]; if (v == null) { pen = false; continue; }
+        const px = X(row[0]), py = T + h - (v - r[0]) / (r[1] - r[0]) * h; pen ? x.lineTo(px, py) : x.moveTo(px, py); pen = true; }
+      x.stroke();
+    });
+  }
+}
+const charts = {
+  att: new Strip($("chAtt"), [{ color: "--c1" }, { color: "--c2" }], { span: 10 }),
+  pow: new Strip($("chPow"), [{ color: "--c4" }, { color: "--c3", right: true }], { span: 1, right: true }),
+  act: new Strip($("chAct"), [{ color: "--c3" }], { min: 0, span: 1 }),
+  loop: new Strip($("chLoop"), [{ color: "--c2" }], { min: 0, span: 30 }),
+};
+
+// ---------- frames ----------
+const fmt = (v, d = 1) => v == null ? "—" : (+v).toFixed(d);
+function cls(v, warn, bad, low) { if (v == null) return ""; if (low) return v < bad ? "x" : v < warn ? "w" : ""; return v > bad ? "x" : v > warn ? "w" : ""; }
+function cell(td, text, c) { td.textContent = text; td.className = c || ""; }
+const STATE_CN = { limp: "卸力", ramp: "回 HOME", hold: "站立待命", run: "策略运行" };
+function render(f) {
+  frame = f; lastFrameAt = performance.now();
+  const st = f.state;
+  $("state").textContent = (STATE_CN[st] || st) + (f.mode ? " · " + f.mode : "");
+  $("stateDot").className = "dot " + (st === "run" ? "ok" : st === "limp" ? "" : "warn");
+  $("hdrV").textContent = f.supply.min == null ? "—" : `${fmt(f.supply.min, 2)} V`;
+  $("hdrV").className = cls(f.supply.min, 6.0, 5.0, true);
+  $("hdrI").textContent = f.supply.current_a == null ? "—" : `${fmt(f.supply.current_a, 1)} A`;
+  const temps = f.joints.temp ? f.joints.temp.filter((v, i) => v != null && v > 0 && i !== 9) : [];
+  const tmax = temps.length ? Math.max(...temps) : null;
+  $("hdrT").textContent = tmax == null ? "—" : `${tmax} °C`; $("hdrT").className = cls(tmax, 55, 65);
+  $("hdrHz").textContent = f.loop.hz == null ? "—" : `${fmt(f.loop.hz, 0)} Hz`; $("hdrHz").className = f.loop.hz && f.loop.hz < 45 ? "w" : "";
+  $("hdrFalls").textContent = f.limped ? `${f.falls}（卸力 ${f.limped}）` : f.falls;
+  if (f.refusal) $("refusal").textContent = f.refusal;
+  document.querySelector('[data-act="enable"]').disabled = st !== "limp";
+  document.querySelector('[data-act="start"]').disabled = st !== "hold";
+  document.querySelector('[data-act="stop"]').disabled = st !== "run";
+  const c = f.cmd;
+  $("cmdEcho").textContent = `机器人收到：vx ${fmt(c.vx, 2)} vy ${fmt(c.vy, 2)} wz ${fmt(c.wz, 1)}` + (c.age_s > 0.5 ? "（指令超时，已归零）" : "");
+  // attitude
+  const p = f.imu.pitch, r = f.imu.roll;
+  $("pitch").textContent = p == null ? "—" : `${fmt(p)}°`; $("roll").textContent = r == null ? "—" : `${fmt(r)}°`;
+  $("pitch").className = cls(Math.abs(p || 0), 15, 30); $("roll").className = cls(Math.abs(r || 0), 15, 30);
+  if (p != null) $("horizon").setAttribute("transform", `rotate(${-r}) translate(0 ${Math.max(-80, Math.min(80, -p * 2))})`);
+  const gy = f.imu.gyro || [];
+  $("gx").textContent = fmt(gy[0], 0); $("gy").textContent = fmt(gy[1], 0); $("gz").textContent = fmt(gy[2], 0);
+  $("amax").textContent = fmt(f.action_max, 2); $("amax").className = cls(f.action_max, 1.0, 1.5);
+  $("imuReady").textContent = f.imu.ready ? "IMU 正常" : "IMU 未就绪";
+  $("modeLine").textContent = st === "run" ? `网络：${f.mode}` + (f.sit !== "up" ? ` · 坐站：${f.sit}` : "") +
+    (f.move ? ` · ${f.move.name} 剩 ${fmt(f.move.remaining, 1)} s` : "") + ` · 摔倒后：${f.on_fall === "keep" ? "继续驱动" : "卸力"}` : (STATE_CN[st] || st);
+  // moves
+  document.querySelectorAll("[data-move]").forEach((b) => {
+    const id = b.dataset.move, bar = b.querySelector(".prog");
+    let frac = 0;
+    if (f.move && f.move.name === id && f.move.duration) frac = 1 - f.move.remaining / f.move.duration;
+    if (id === "sit" && f.sit !== "up") frac = 1;
+    bar.style.width = (frac * 100).toFixed(0) + "%";
+    b.disabled = st !== "run" || (f.busy && !(id === "sit")) || (f.sit === "sitting" && id !== "sit");
+  });
+  // joints
+  if (info) {
+    const J = f.joints;
+    info.joints.forEach((jj, j) => {
+      if (jj.mouth) return;
+      const tr = $("j" + j); if (!tr) return; const td = tr.children;
+      const pos = J.pos ? J.pos[j] : null, tgt = J.tgt ? J.tgt[j] : null, err = pos != null && tgt != null ? tgt - pos : null;
+      cell(td[1], fmt(pos)); cell(td[2], fmt(tgt)); cell(td[3], fmt(err), cls(Math.abs(err || 0), 15, 30));
+      cell(td[4], fmt(J.vel ? J.vel[j] : null, 0));
+      const cur = J.cur ? J.cur[j] : null; cell(td[5], cur == null ? "—" : Math.abs(cur).toFixed(0), cls(Math.abs(cur || 0), 2000, 3000));
+      const v = J.volt ? J.volt[j] : null; cell(td[6], v == null || v <= 0 ? "—" : fmt(v, 1), cls(v > 0 ? v : null, 6.0, 5.0, true));
+      const t = J.temp ? J.temp[j] : null; cell(td[7], t == null || t <= 0 ? "—" : t.toFixed(0), cls(t, 55, 65));
+      const [lo, hi] = jj.limits_deg, span = hi - lo || 1;
+      const bar = td[8].querySelector(".bar");
+      if (pos != null) bar.querySelector("i").style.left = `calc(${Math.max(0, Math.min(1, (pos - lo) / span)) * 100}% - 1px)`;
+      bar.querySelector("u").style.left = `calc(${Math.max(0, Math.min(1, (0 - lo) / span)) * 100}% - 1px)`;
+    });
+  }
+  // recording
+  const rec = f.recording;
+  $("rec").textContent = rec.on ? "停止并保存" : "开始记录";
+  $("rec").classList.toggle("primary", !!rec.on);
+  if (rec.on) $("recLine").textContent = `记录中 ${rec.seconds} s（${rec.ticks} 拍）`;
+  // charts
+  const t = f.t;
+  charts.att.push(t, [p, r]); charts.pow.push(t, [f.supply.min, f.supply.current_a]);
+  charts.act.push(t, [f.action_max]); charts.loop.push(t, [f.loop.max_ms]);
+  if (f.events_seq > lastEventSeq) loadEvents();
+}
+function drawCharts() { Object.values(charts).forEach((c) => c.draw()); requestAnimationFrame(drawCharts); }
+function linkWatch() {
+  const age = (performance.now() - lastFrameAt) / 1000;
+  const s = !lastFrameAt ? ["离线", "bad"] : age < 0.6 ? ["在线", "ok"] : age < 3 ? ["延迟", "warn"] : ["断开", "bad"];
+  $("link").textContent = s[0]; $("linkDot").className = "dot " + s[1];
+}
+setInterval(linkWatch, 300);
+
+function connect() {
+  const es = new EventSource("/api/stream");
+  es.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch (err) { console.error(err); } };
+  es.onerror = () => { /* EventSource reconnects by itself */ };
+}
+loadInfo().then(() => { connect(); loadLogs(); loadEvents(); requestAnimationFrame(drawCharts); })
+  .catch((e) => banner("连不上机器人：" + e));
+</script>
+</body>
+</html>

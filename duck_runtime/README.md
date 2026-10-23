@@ -87,6 +87,24 @@ duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0
   （仿真 835 g：趴着/侧躺/仰躺 0.6–1.8 s 站起）；还没起来超过 `--getup-timeout`（默认 5 s）才卸力。
   这个模式下按 `2` 也可以在鸭子躺在地上时启动策略，让它自己站起来。
 
+### 网页中控（推荐）
+
+```bash
+duck duck_runtime.dashboard --calib calib.json --set policies --keep-on-fall
+```
+
+终端会打印 `http://microduck.local:8000/?token=...`，同一网络里的电脑或手机打开即可（第一次打开要带 token，之后页面记住）。
+和 `duck_runtime.run` 是同一套控制代码，只是用网页代替键盘：
+
+- 顶栏：连接状态、当前状态和网络、电池（舵机最低电压）、总电流、最高温度、控制频率、摔倒次数、红色卸力按钮。
+- 电源/策略（上力矩、启动、停止）、速度和头部滑条、坐站和每个动作的按钮（带进度）、摔倒后卸力还是自己爬起来。
+- 姿态仪（俯仰/横滚/角速度）、最近 20 秒曲线：姿态、电压和电流、策略输出、控制周期。
+- 14 个关节：位置、目标、误差、速度、电流、电压、温度、在限位范围里的位置；超限变色。
+- 记录：一键开始/停止，存到机器人上的 `logs/`（字段同 `--log`），页面里直接下载；事件列表（状态切换、摔倒、拒绝原因）。
+- 键盘按键和终端版相同。关掉或切走页面 0.5 s 后速度指令自动归零（页面每 200 ms 发一次心跳）。
+- 同一时间只能有一个程序占用舵机：用网页时不要再开 `duck_runtime.run`。
+- 在电脑上试：`uv run python -m duck_runtime.dashboard --backend sim --set policies --supply robot`，打开 http://localhost:8000 。
+
 ### 3. 官方策略集（坐下/站起、捡东西、踢球、翻滚）
 
 `--set` 读官方 Hub 仓库 `pollen-robotics/microduck-policies` 的 `manifest.json`（schema 2），

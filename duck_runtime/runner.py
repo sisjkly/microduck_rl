@@ -97,6 +97,8 @@ class Runner:
         self.stand_pose = DEFAULT_POSITION.copy()
         self.stand_pose[list(HEAD_JOINTS)] += np.asarray(self.head_offset, dtype=float)
         self._clear_moves()
+        self.last_sensors: Sensors | None = None
+        self.last_targets: np.ndarray | None = None
 
     def _clear_moves(self) -> None:
         self.move: _Move | None = None
@@ -233,8 +235,11 @@ class Runner:
             targets = self._policy_step(s)
             obs = self.controller.last_obs
 
+        self.last_sensors = s
         if targets is not None:
-            self.io.write(self.safety.clamp(targets))
+            targets = self.safety.clamp(targets)
+            self.io.write(targets)
+            self.last_targets = targets
         if self.log is not None:
             cur = getattr(self.io, "currents", None)
             self.log.append(TickLog(s.t, self.state.value, obs, None if targets is None else targets.copy(),

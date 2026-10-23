@@ -29,6 +29,14 @@ STIFF_SOLREF = (-5.0e4, -2.0e2)
 STIFF_SOLIMP = (0.99, 0.9999, 0.001, 0.5, 2.0)
 
 
+# Battery sag presets (see SimIO vin_drop_gain / vin_min).
+SUPPLY_PRESETS = {
+    "ideal": dict(vin=7.6, vin_drop_gain=0.1, vin_min=6.0),        # training-like
+    "robot": dict(vin=7.5, vin_drop_gain=1.8, vin_min=3.0),        # this robot, set6.npz
+    "robot-full": dict(vin=8.4, vin_drop_gain=1.8, vin_min=3.0),   # same wiring, full pack
+}
+
+
 class SimIO(RobotIO):
     def __init__(self, mass_profile: str | None = "ours_835g", servo: str = "hd1910",
                  kp_fw: float | None = None, vin: float | None = None, physics_dt: float = 0.005,
