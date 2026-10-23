@@ -33,7 +33,8 @@ class SimIO(RobotIO):
     def __init__(self, mass_profile: str | None = "ours_835g", servo: str = "hd1910",
                  kp_fw: float | None = None, vin: float | None = None, physics_dt: float = 0.005,
                  decimation: int = 4, actuator_delay_steps: int = 4, imu_mount=DEFAULT_MOUNT,
-                 scene: Path = SCENE, seed: int = 0):
+                 scene: Path = SCENE, seed: int = 0,
+                 vin_drop_gain: float = 0.1, vin_min: float = 6.0):
         import sys
         sys.path.insert(0, str(REPO / "src"))
         from bam.model import load_model
@@ -75,7 +76,11 @@ class SimIO(RobotIO):
         self.model.opt.timestep = physics_dt
         self.data = mujoco.MjData(self.model)
         self.bam = bam
-        self.ctrl = MujocoController(bam, names, self.model, self.data, vin_drop_gain=0.1, vin_min=6.0)
+        # Supply sag: V = vin - vin_drop_gain * sum|tau| (V per N.m), floored at vin_min.
+        # Training: gain 0-0.2, floor 6 V (XL330). This robot (set6.npz): 7.5 V idle, 4.6 V at the
+        # rise's peak and 3-4 V in a kick -> --vin-min well below 6 reproduces it.
+        self.ctrl = MujocoController(bam, names, self.model, self.data, vin_drop_gain=vin_drop_gain, vin_min=vin_min)
+        self.voltages = np.full(NUM_JOINTS, float(bam.actuator.vin))
         # Our 15-joint order -> model actuator order (the sim has no mouth joint).
         self._sim_joints = [j for j in range(NUM_JOINTS) if j != MOUTH_INDEX]
         self._act_index = [names.index(JOINT_NAMES[j]) for j in self._sim_joints]
@@ -166,6 +171,10 @@ class SimIO(RobotIO):
             if self.torque:
                 self.ctrl.q_target[self._act_index] = q_target
                 self.ctrl.update()
+                c = self.ctrl
+                if c.vin_drop_gain is not None:
+                    v = self.bam.actuator.vin - c.vin_drop_gain * float(np.sum(np.abs(c._prev_motor_torque)))
+                    self.voltages[:] = max(v, c.vin_min) if c.vin_min is not None else v
             else:
                 self.data.ctrl[:] = 0.0
             mujoco.mj_step(self.model, self.data)

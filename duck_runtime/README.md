@@ -136,6 +136,10 @@ uv run scripts/rehearse_set.py --set policies --profile official    # 换成原�
 vx / vy / wz 和头部四个角度滑条、坐站和每个动作的按钮、推一下（dvx / dvy）、躯干俯仰/横滚和策略输出的实时曲线。
 默认上力矩后自动启动策略（仿真里只上力矩不跑策略，鸭子会在 ~45 s 内慢慢往前倒）。
 
+**电池压降**：`--supply robot` 用本机实测的压降（set6.npz：空闲 7.5 V，站起时最低约 4.6 V，踢腿 3–4 V；约 0.1 Ω），
+`--supply robot-full` 同样线路换满电 8.4 V，默认 `ideal` 是训练时的设定（7.6 V，最低 6 V）。
+用 `robot` 时仿真复现了真机现象：右踢往前倒、左踢没事，站起时膝盖晚动、伸直变慢；换 `robot-full` 右踢不倒。
+
 `rehearse_set.py` 用的是和真机完全相同的 Runner / Controller / policy_set，只是身体换成 SimIO
 （MuJoCo + BAM HD1910 + 质量配置，全碰撞场景）。其它参数：`--on-fall keep`（官方的摔倒后继续驱动）、
 `--cmd=0.05,0,-0.2`（全程走路指令）、`--policy` / `--sitstand`（换网络）、`--log DIR`（每次一个 npz，

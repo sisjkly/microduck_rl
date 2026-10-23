@@ -40,6 +40,15 @@ from duck_runtime.runner import Runner, State  # noqa: E402
 from duck_runtime.sim_io import SimIO  # noqa: E402
 
 
+SUPPLIES = {"ideal": dict(vin=7.6, vin_drop_gain=0.1, vin_min=6.0),
+            "robot": dict(vin=7.5, vin_drop_gain=1.8, vin_min=3.0),
+            "robot-full": dict(vin=8.4, vin_drop_gain=1.8, vin_min=3.0)}
+
+
+def supply_kwargs(args) -> dict:
+    return SUPPLIES[getattr(args, "supply", "ideal")]
+
+
 def tilt_deg(g) -> float:
     return math.degrees(math.acos(float(np.clip(-g[2], -1.0, 1.0))))
 
@@ -49,7 +58,8 @@ def pitch_deg(g) -> float:
 
 
 def episode(pset, args, scenario: str, seed: int) -> dict:
-    io = SimIO(mass_profile=None if args.profile == "official" else args.profile, servo="hd1910", seed=seed)
+    io = SimIO(mass_profile=None if args.profile == "official" else args.profile, servo="hd1910", seed=seed,
+               **supply_kwargs(args))
     io.reset(joint_noise=args.joint_noise)
     viewer = None
     if args.viewer:
@@ -140,6 +150,10 @@ def main(argv=None):
     ap.add_argument("--scenario", default="all",
                     help="sitstand | kick_left | kick_right | ground_pick | roulade | all")
     ap.add_argument("--seeds", type=int, default=8)
+    ap.add_argument("--supply", choices=["ideal", "robot", "robot-full"], default="ideal",
+                    help="battery sag model: ideal = training-like (7.6 V, floor 6 V); robot = this robot's "
+                         "measured sag (set6.npz: 7.5 V idle, ~4.6 V in a rise, 3-4 V in a kick); "
+                         "robot-full = same wiring with a fully charged 8.4 V pack")
     ap.add_argument("--profile", default="ours_835g", help="mass profile: ours_835g | ours_813g | official | ...")
     ap.add_argument("--on-fall", choices=["limp", "keep"], default="limp",
                     help="limp = this robot's runtime default; keep = robotd's")

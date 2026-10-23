@@ -44,6 +44,15 @@ SPEEDS = {"1/4x": 0.25, "1/2x": 0.5, "1x": 1.0}
 HEAD_NAMES = ("neck_pitch", "head_pitch", "head_yaw", "head_roll")
 
 
+SUPPLIES = {"ideal": dict(vin=7.6, vin_drop_gain=0.1, vin_min=6.0),
+            "robot": dict(vin=7.5, vin_drop_gain=1.8, vin_min=3.0),
+            "robot-full": dict(vin=8.4, vin_drop_gain=1.8, vin_min=3.0)}
+
+
+def supply_kwargs(args) -> dict:
+    return SUPPLIES[getattr(args, "supply", "ideal")]
+
+
 def pitch_roll(g) -> tuple[float, float]:
     return (math.degrees(math.atan2(-g[0], -g[2])), math.degrees(math.atan2(g[1], -g[2])))
 
@@ -63,7 +72,7 @@ class DuckApp:
             self.tuning.action_scale = args.action_scale
 
         self.io = SimIO(mass_profile=None if args.profile == "official" else args.profile, servo="hd1910",
-                        seed=args.seed)
+                        seed=args.seed, **supply_kwargs(args))
         self.actions: queue.Queue = queue.Queue()   # GUI threads -> sim loop
         self.speed = 1.0
         self.message = ""
@@ -195,7 +204,7 @@ class DuckApp:
         state = r.state.value + (f" · {r.mode}" if r.state is State.RUN else "")
         return f"""<div style="font-size:0.9em;line-height:1.45;padding:0 1em 0.5em 1em;">
           <b>State</b> {state}<br/>
-          <b>Pitch</b> {p:+.1f}°  <b>Roll</b> {rl:+.1f}°  <b>Height</b> {z * 100:.1f} cm<br/>
+          <b>Pitch</b> {p:+.1f}°  <b>Roll</b> {rl:+.1f}°  <b>Height</b> {z * 100:.1f} cm  <b>Supply</b> {self.io.voltages[0]:.1f} V<br/>
           <b>Falls</b> {r.falls_seen} (limped {r.fall_events})  <b>Sim</b> {self.io.now():.1f} s  <b>Speed</b> {self.speed:g}x<br/>
           <span style="color:#888;">{self.message}</span></div>"""
 
@@ -252,6 +261,10 @@ def main(argv=None):
     ap.add_argument("--set", dest="policy_set", help="directory with manifest.json + .onnx (from the robot)")
     ap.add_argument("--policy", help="gait ONNX; with --set overrides its walk slot")
     ap.add_argument("--sitstand", help="with --set: another sit/stand network")
+    ap.add_argument("--supply", choices=["ideal", "robot", "robot-full"], default="ideal",
+                    help="battery sag model: ideal = training-like (7.6 V, floor 6 V); robot = this robot's "
+                         "measured sag (set6.npz: 7.5 V idle, ~4.6 V in a rise, 3-4 V in a kick); "
+                         "robot-full = same wiring with a fully charged 8.4 V pack")
     ap.add_argument("--profile", default="ours_835g", help="mass profile: ours_835g | ours_813g | official | ...")
     ap.add_argument("--on-fall", choices=["limp", "keep"], default="limp")
     ap.add_argument("--action-scale", type=float, default=None)
