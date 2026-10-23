@@ -155,7 +155,7 @@ def main(argv=None):
                          "measured sag (set6.npz: 7.5 V idle, ~4.6 V in a rise, 3-4 V in a kick); "
                          "robot-full = same wiring with a fully charged 8.4 V pack")
     ap.add_argument("--profile", default="ours_835g", help="mass profile: ours_835g | ours_813g | official | ...")
-    ap.add_argument("--on-fall", choices=["limp", "keep"], default="limp",
+    ap.add_argument("--on-fall", choices=["limp", "keep", "getup"], default="limp",
                     help="limp = this robot's runtime default; keep = robotd's")
     ap.add_argument("--action-scale", type=float, default=None)
     ap.add_argument("--cmd", default="0,0,0", help="walk command vx,vy,wz held throughout (use = for negatives)")

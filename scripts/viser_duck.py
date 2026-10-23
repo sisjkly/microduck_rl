@@ -143,7 +143,7 @@ class DuckApp:
                     "Auto-start policy", initial_value=True,
                     hint="Start the policy as soon as the ramp to HOME ends (a simulated duck held at HOME "
                          "with the policy off slowly tips over)")
-                fall = gui.add_dropdown("On fall", options=["limp", "keep"], initial_value=self.args.on_fall,
+                fall = gui.add_dropdown("On fall", options=["limp", "keep", "getup"], initial_value=self.args.on_fall,
                                         hint="limp = the robot runtime's rule; keep = robotd's default")
 
                 @fall.on_update
@@ -266,7 +266,7 @@ def main(argv=None):
                          "measured sag (set6.npz: 7.5 V idle, ~4.6 V in a rise, 3-4 V in a kick); "
                          "robot-full = same wiring with a fully charged 8.4 V pack")
     ap.add_argument("--profile", default="ours_835g", help="mass profile: ours_835g | ours_813g | official | ...")
-    ap.add_argument("--on-fall", choices=["limp", "keep"], default="limp")
+    ap.add_argument("--on-fall", choices=["limp", "keep", "getup"], default="limp")
     ap.add_argument("--action-scale", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--host", default="0.0.0.0")

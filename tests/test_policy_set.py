@@ -89,9 +89,11 @@ def test_partial_download_and_overrides(tmp_path):
 class UprightIO(RobotIO):
     def __init__(self):
         self.t, self.torque, self.written, self.gravity = 0.0, False, [], np.array([0.0, 0.0, -1.0])
+        self.gyro = np.zeros(3)
+        self.torque_calls = []
 
     def read(self):
-        return Sensors(positions=DEFAULT_POSITION.copy(), imu=ImuData(gravity=self.gravity.copy()),
+        return Sensors(positions=DEFAULT_POSITION.copy(), imu=ImuData(gravity=self.gravity.copy(), gyro=self.gyro.copy()),
                        imu_ready=True, t=self.t)
 
     def write(self, targets):
@@ -99,6 +101,7 @@ class UprightIO(RobotIO):
 
     def set_torque(self, on):
         self.torque = on
+        self.torque_calls.append(on)
 
     def now(self):
         return self.t
@@ -219,3 +222,48 @@ def test_keep_on_fall_starts_from_the_floor_and_gives_up_after_the_timeout(tmp_p
     assert r.state is State.RUN and r.falls_seen == 2
     drive(r, 70)                                                 # > 5 s down
     assert r.state is State.LIMP and r.fall_events == 1 and "still down" in r.refusal
+
+
+def test_getup_limp_fall_sequence(tmp_path):
+    """robotd limp-fall: limp as the fall starts, land, pose to standing, hand back."""
+    r, nets, io = running(tmp_path)
+    r.on_fall = "getup"
+    drive(r, 5)
+    io.torque_calls.clear()
+    n_walk = len(nets["velstand"].seen)
+    # Tipping forward at 3 rad/s, 35 deg over: the predictor fires after its 60 ms debounce.
+    tilt = math.radians(35)
+    io.gravity = np.array([math.sin(tilt), 0.0, -math.cos(tilt)])
+    io.gyro = np.array([0.0, 3.0, 0.0])
+    drive(r, 4)
+    assert r.fall_seq and r.fall_seq["phase"] == "limp" and io.torque_calls == [False] and r.falls_seen == 1
+    assert r.mode == "fall:limp"
+    # Landed on its face, still: torque back on after 0.2 s of stillness, then a 0.6 s pose.
+    io.gravity = np.array([1.0, 0.0, 0.0])
+    io.gyro = np.zeros(3)
+    drive(r, 12)
+    assert r.fall_seq["phase"] == "pose" and io.torque_calls == [False, True]
+    n_before = len(nets["velstand"].seen)
+    drive(r, 25)
+    assert len(nets["velstand"].seen) == n_before            # the policy is not stepped while posing
+    drive(r, 8)
+    assert r.fall_seq is None and r.mode == "walk" and r.state is State.RUN
+    assert len(nets["velstand"].seen) > n_walk
+    # Still down 5 s after the hand-back: give up and limp.
+    drive(r, 260)
+    assert r.state is State.LIMP and r.fall_events == 1 and "still down" in r.refusal
+
+
+def test_getup_ignores_footfalls_moves_and_robots_already_down(tmp_path):
+    r, _, io = running(tmp_path)
+    r.on_fall = "getup"
+    io.gyro = np.array([0.0, 3.0, 0.0])                      # an upright robot rocking: no fall
+    tilt = math.radians(8)
+    io.gravity = np.array([math.sin(tilt), 0.0, -math.cos(tilt)])
+    drive(r, 20)
+    assert r.fall_seq is None
+    assert r.trigger("roulade") is None                     # tipping over on purpose
+    tilt = math.radians(40)
+    io.gravity = np.array([math.sin(tilt), 0.0, -math.cos(tilt)])
+    drive(r, 20)
+    assert r.fall_seq is None

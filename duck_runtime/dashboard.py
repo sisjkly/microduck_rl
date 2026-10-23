@@ -171,7 +171,7 @@ class Dashboard:
     def settings(self, body: dict) -> dict:
         def apply():
             if "on_fall" in body:
-                if body["on_fall"] not in ("limp", "keep"):
+                if body["on_fall"] not in ("limp", "keep", "getup"):
                     raise ValueError("on_fall")
                 self.runner.on_fall = body["on_fall"]
             if "getup_timeout_s" in body:

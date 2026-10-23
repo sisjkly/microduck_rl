@@ -152,7 +152,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin:
       <h2>安全</h2>
       <div class="slider" style="grid-template-columns: 110px minmax(0,1fr)">
         <label>摔倒后</label>
-        <select id="onFall"><option value="limp">卸力</option><option value="keep">继续驱动，让它自己爬起来</option></select>
+        <select id="onFall"><option value="limp">卸力</option><option value="getup">官方起身：先软着地，再摆好姿势站起来</option><option value="keep">一直驱动，让它自己爬起来</option></select>
       </div>
       <div class="slider" style="grid-template-columns: 110px minmax(0,1fr)">
         <label>爬不起来时</label>
@@ -437,7 +437,7 @@ function render(f) {
   $("amax").textContent = fmt(f.action_max, 2); $("amax").className = cls(f.action_max, 1.0, 1.5);
   $("imuReady").textContent = f.imu.ready ? "IMU 正常" : "IMU 未就绪";
   $("modeLine").textContent = st === "run" ? `网络：${f.mode}` + (f.sit !== "up" ? ` · 坐站：${f.sit}` : "") +
-    (f.move ? ` · ${f.move.name} 剩 ${fmt(f.move.remaining, 1)} s` : "") + ` · 摔倒后：${f.on_fall === "keep" ? "继续驱动" : "卸力"}` : (STATE_CN[st] || st);
+    (f.move ? ` · ${f.move.name} 剩 ${fmt(f.move.remaining, 1)} s` : "") + ` · 摔倒后：${{keep: "一直驱动", getup: "官方起身", limp: "卸力"}[f.on_fall] || f.on_fall}` : (STATE_CN[st] || st);
   // moves
   document.querySelectorAll("[data-move]").forEach((b) => {
     const id = b.dataset.move, bar = b.querySelector(".prog");

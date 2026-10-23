@@ -52,3 +52,40 @@ class Safety:
         if command_age_s > self.deadman_s:
             return Command(twist=(0.0, 0.0, 0.0), head=command.head)
         return command
+
+
+class FallPredictor:
+    """duck-control/src/fall.rs: fires once when a fall has *started* (before the landing).
+
+    d(gravity_z)/dt = -(wx*gy - wy*gx); going down = already past ``tilt_z`` (~26 deg), the
+    tilt still growing, and the extrapolation ``lookahead`` ahead past ``predicted_z``,
+    held for ``debounce`` (three ticks at 50 Hz: longer than a footfall impulse).
+    """
+
+    def __init__(self, tilt_z: float = -0.90, predicted_z: float = -0.5,
+                 lookahead_s: float = 0.3, debounce_s: float = 0.06):
+        self.tilt_z, self.predicted_z = tilt_z, predicted_z
+        self.lookahead_s, self.debounce_s = lookahead_s, debounce_s
+        self.reset()
+
+    @staticmethod
+    def gravity_z_rate(imu) -> float:
+        g, w = imu.gravity, imu.gyro
+        return float(-(w[0] * g[1] - w[1] * g[0]))
+
+    def observe(self, imu, dt: float) -> bool:
+        rate = self.gravity_z_rate(imu)
+        going_down = (imu.gravity[2] > self.tilt_z and rate > 0.0
+                      and imu.gravity[2] + rate * self.lookahead_s > self.predicted_z)
+        if not going_down:
+            self.reset()
+            return False
+        self.falling_for += dt
+        if self.falling_for >= self.debounce_s - 1e-9 and not self.fired:
+            self.fired = True
+            return True
+        return False
+
+    def reset(self) -> None:
+        self.falling_for = 0.0
+        self.fired = False

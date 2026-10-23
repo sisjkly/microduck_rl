@@ -29,7 +29,7 @@ from .contract import DEFAULT_POSITION, HEAD_JOINTS, MOUTH_CLOSED, MOUTH_INDEX
 from .controller import Command, Controller
 from .io import RobotIO, Sensors
 from .policy_set import PolicySet, Skill
-from .safety import Safety
+from .safety import FallPredictor, Safety
 
 
 class State(Enum):
@@ -68,7 +68,12 @@ class Runner:
     controller: Controller
     safety: Safety = field(default_factory=Safety)
     ramp_s: float = 2.0
-    on_fall: str = "limp"          # "limp" | "keep" (keep driving, like the official default)
+    # What a fall does while the policy runs:
+    #   "limp"  torque off and stay off (this runtime's default)
+    #   "keep"  keep driving; velstand v8 gets itself up (robotd with limp_fall = false)
+    #   "getup" robotd's default limp-fall: torque off as the fall starts, land soft, wait
+    #           until still, ease into the stand pose, hand back to the policy to stand up
+    on_fall: str = "limp"
     log: list[TickLog] | None = None
     # Neck/head offsets from HOME (rad, [neck_pitch, head_pitch, head_yaw, head_roll]) used for
     # RAMP/HOLD. Pair it with the same Command.head so the policy tracks the pose it starts in
@@ -82,6 +87,11 @@ class Runner:
     # on_fall="keep": velstand v8 gets itself up (SimIO 835 g: 0.6-1.8 s from face/side/back).
     # Still down after this long -> limp, so a stuck robot does not thrash on the floor.
     getup_timeout_s: float | None = 5.0
+    # robotd-params [safety] limp_fall_* defaults (landing and the pose back to standing).
+    limp_fall_still_rate: float = 1.0     # rad/s: below this counts as landed
+    limp_fall_still_s: float = 0.2
+    limp_fall_max_s: float = 1.5          # stop waiting for stillness after this
+    limp_fall_pose_s: float = 0.6
 
     def __post_init__(self):
         self.state = State.LIMP
@@ -99,6 +109,7 @@ class Runner:
         self._clear_moves()
         self.last_sensors: Sensors | None = None
         self.last_targets: np.ndarray | None = None
+        self.predictor = FallPredictor()
 
     def _clear_moves(self) -> None:
         self.move: _Move | None = None
@@ -107,6 +118,7 @@ class Runner:
         self.rise_left = 0.0
         self.mode = ""
         self._grace_until = -1e9
+        self.fall_seq: dict | None = None     # on_fall="getup": the limp-fall sequence in progress
 
     @property
     def busy(self) -> bool:
@@ -170,8 +182,8 @@ class Runner:
             return False
         s = self.io.read()
         lying = s.imu.gravity[2] > self.safety.fall_gravity_z
-        if not s.imu_ready or (lying and self.on_fall != "keep"):
-            # With on_fall="keep" the policy may start from the floor: v8 gets up by itself.
+        if not s.imu_ready or (lying and self.on_fall == "limp"):
+            # With keep / getup the policy may start from the floor: v8 gets up by itself.
             self.refusal = ("IMU not ready" if not s.imu_ready
                             else "robot is not upright (--keep-on-fall lets the policy get it up)")
             return False
@@ -204,10 +216,23 @@ class Runner:
         fallen = self.safety.update_fall(s) if s.imu_ready else False
         obs = targets = None
 
-        if self.state is State.RUN and fallen and not self._was_fallen:
+        if self.state is State.RUN and fallen and not self._was_fallen and self.fall_seq is None:
             self.falls_seen += 1
+        if (self.state is State.RUN and self.on_fall == "getup" and self.fall_seq is None
+                and s.imu_ready):
+            # Catch the fall on the way down (robotd main.rs limp-fall): not for a robot already
+            # down and working its way up, nor during a move or a sit (a roulade tips over on
+            # purpose, a ground pick pitches forward, a sit is not a fall).
+            if not fallen and not self.busy and self.sit != "sitting":
+                if self.predictor.observe(s.imu, self.io.control_dt):
+                    self.falls_seen += 1
+                    self.io.set_torque(False)
+                    self.fall_seq = {"phase": "limp", "since": s.t, "still": 0.0}
+                    self.mode = "fall:limp"
+            else:
+                self.predictor.reset()
         if (self.state is State.RUN and fallen and not (self.busy or self.sit == "sitting")
-                and s.t >= self._grace_until):
+                and s.t >= self._grace_until and self.fall_seq is None):
             if self.on_fall == "limp":
                 self.fall_events += 1
                 self.limp()
@@ -231,6 +256,9 @@ class Runner:
             # Never run the policy on a stale/default orientation: go limp, say why.
             self.refusal = "IMU stopped updating while running"
             self.limp()
+        elif self.state is State.RUN and self.fall_seq is not None:
+            targets = self._limp_fall_step(s)
+            obs = self.controller.last_obs if self.fall_seq is None else None
         elif self.state is State.RUN:
             targets = self._policy_step(s)
             obs = self.controller.last_obs
@@ -250,6 +278,35 @@ class Runner:
                                     else np.array(self.io.voltages, dtype=float)))
         self.io.wait_tick()
         return s
+
+    def _limp_fall_step(self, s: Sensors) -> np.ndarray | None:
+        fs = self.fall_seq
+        dt = self.io.control_dt
+        if fs["phase"] == "limp":
+            rate = float(np.linalg.norm(s.imu.gyro))
+            fs["still"] = fs["still"] + dt if rate < self.limp_fall_still_rate else 0.0
+            if fs["still"] >= self.limp_fall_still_s - 1e-9 or s.t - fs["since"] >= self.limp_fall_max_s:
+                try:
+                    self.io.set_torque(True)        # goal = where each joint lies: no jump
+                except RuntimeError as e:
+                    self.fall_events += 1
+                    self.refusal = f"get-up: torque on refused: {e}"
+                    self.limp()
+                    return None
+                self.fall_seq = {"phase": "pose", "since": s.t, "from": s.positions.copy()}
+                self.mode = "fall:pose"
+            return None
+        a = (s.t - fs["since"]) / max(self.limp_fall_pose_s, 1e-6)
+        if a >= 1.0:
+            # Posed: hand back with fresh feedback state; the policy stands it up.
+            self.fall_seq = None
+            self.predictor.reset()
+            self.controller.reset()
+            self._run_t0 = s.t                      # get-up timeout counts from here
+            return self._policy_step(s)
+        targets = fs["from"] + (self.stand_pose - fs["from"]) * a
+        targets[MOUTH_INDEX] = MOUTH_CLOSED
+        return targets
 
     def _policy_step(self, s: Sensors) -> np.ndarray:
         dt = self.io.control_dt

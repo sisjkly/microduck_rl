@@ -76,11 +76,14 @@ def add_runner_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--echo", choices=["auto", "yes", "no"], default="auto", help="feetech only")
     ap.add_argument("--imu-port", default=None, help="feetech only: ESP32 IMU link port")
     ap.add_argument("--calib")
-    ap.add_argument("--keep-on-fall", action="store_true",
-                    help="keep driving after a fall so velstand v8 gets the robot up (official default); "
-                         "also lets 2 start the policy with the robot on the floor")
+    ap.add_argument("--on-fall", choices=["limp", "keep", "getup"], default=None,
+                    help="limp: torque off (default). keep: keep driving, velstand v8 gets up. "
+                         "getup: robotd's default limp-fall: go limp as the fall starts, land soft, "
+                         "ease into the stand pose, then the policy stands up. keep/getup also let "
+                         "2 start the policy with the robot on the floor")
+    ap.add_argument("--keep-on-fall", action="store_true", help="same as --on-fall keep")
     ap.add_argument("--getup-timeout", type=float, default=5.0,
-                    help="with --keep-on-fall: limp if still down after this many seconds (0 = never)")
+                    help="with keep/getup: limp if still down after this many seconds (0 = never)")
     ap.add_argument("--supply", choices=["ideal", "robot", "robot-full"], default="ideal",
                     help="sim only: battery sag model (robot = this robot's measured sag)")
     ap.add_argument("--head-cmd", default="0,0,0,0",
@@ -128,7 +131,7 @@ def build_runner(args, ap: argparse.ArgumentParser):
     else:
         ap.error("--policy or --set is required")
     runner = Runner(io, Controller(walk, tuning), safety,
-                    on_fall="keep" if args.keep_on_fall else "limp", log=log, head_offset=head,
+                    on_fall=args.on_fall or ("keep" if args.keep_on_fall else "limp"), log=log, head_offset=head,
                     policies=pset, getup_timeout_s=args.getup_timeout or None)
     return runner, io, pset, skill_keys, head
 
