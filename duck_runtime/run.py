@@ -191,7 +191,8 @@ def main(argv=None):
                                 positions=np.array([r.positions for r in log]),
                                 gravity=np.array([r.gravity for r in log]), gyro=np.array([r.gyro for r in log]),
                                 currents=np.array([np.full(15, np.nan) if r.currents is None else r.currents for r in log]),
-                                mode=[r.mode for r in log])
+                                mode=[r.mode for r in log],
+                                voltages=np.array([np.full(15, np.nan) if r.voltages is None else r.voltages for r in log]))
             print(f"\nlog -> {args.log}")
 
 

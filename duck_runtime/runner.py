@@ -51,6 +51,7 @@ class TickLog:
     fallen: bool
     currents: np.ndarray | None = None   # mA per joint, when the backend reports it (bridge)
     mode: str = ""                       # network driving in RUN: walk / sit / rise / <skill>
+    voltages: np.ndarray | None = None   # V per servo (bridge): sag under load slows big moves
 
 
 @dataclass
@@ -239,7 +240,9 @@ class Runner:
             self.log.append(TickLog(s.t, self.state.value, obs, None if targets is None else targets.copy(),
                                     s.positions.copy(), s.imu.gravity.copy(), s.imu.gyro.copy(), fallen,
                                     None if cur is None else np.array(cur, dtype=float),
-                                    self.mode if self.state is State.RUN else ""))
+                                    self.mode if self.state is State.RUN else "",
+                                    None if getattr(self.io, "voltages", None) is None
+                                    else np.array(self.io.voltages, dtype=float)))
         self.io.wait_tick()
         return s
 
