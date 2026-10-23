@@ -212,6 +212,11 @@ class Bridge:
             left = deadline - time.monotonic()
             if left <= 0:
                 missing = [i for i in expect if i not in got]
+                # The bridge may still answer late (a native register read blocks its USB loop
+                # for up to 100 ms): let that land and throw it away, so the next request
+                # cannot take a stale reply for its own.
+                time.sleep(0.12)
+                self.port.drain()
                 raise BridgeError(f"no reply from virtual ID(s) {missing}")
             for id_, err, params in self.parser.feed(self.port.read_some(left)):
                 if id_ in expect:
@@ -394,10 +399,17 @@ class BridgeIO(RobotIO):
         p, d = self.gains
         for i in self.ids:
             self.bridge.npd(i, p, d)
-        deadline = time.monotonic() + 0.5
+        deadline = time.monotonic() + 1.0
         pending = set(self.ids)
         while pending and time.monotonic() < deadline:
-            pending = {i for i in pending if self.bridge.native(i, 50, 2) != bytes([p, d])}
+            still = set()
+            for i in pending:
+                try:
+                    if self.bridge.native(i, 50, 2) != bytes([p, d]):
+                        still.add(i)
+                except BridgeError:          # a slow native read: ask again
+                    still.add(i)
+            pending = still
         if pending:
             raise BridgeError(f"RAM P/D readback != {p}/{d} on IDs {sorted(pending)}; torque-on refused")
         # Goal = where each joint is now, then torque: the bridge applies them in order.
