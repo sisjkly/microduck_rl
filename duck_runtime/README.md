@@ -83,7 +83,9 @@ duck duck_runtime.run --calib calib.json --policy velstand.onnx --action-scale 0
 - `run` 会拒绝未完成标定（每个关节 `calibrated`、`imu_mount_verified`）的配置。
 - 第一次运行吊着、`--action-scale 0.7`；落地后再恢复默认 0.9。
 - 摇杆量给到 **0.2–0.3** 才会迈步（策略本身的特性，仿真和 mjlab 一致）。
-- 跌倒（倾斜 >60° 持续 200 ms）默认立即卸力；`--keep-on-fall` 改成继续驱动（官方默认行为）。
+- 跌倒（倾斜 >60° 持续 200 ms）默认立即卸力。`--keep-on-fall` 改成继续驱动（官方默认行为），velstand v8 会自己爬起来
+  （仿真 835 g：趴着/侧躺/仰躺 0.6–1.8 s 站起）；还没起来超过 `--getup-timeout`（默认 5 s）才卸力。
+  这个模式下按 `2` 也可以在鸭子躺在地上时启动策略，让它自己站起来。
 
 ### 3. 官方策略集（坐下/站起、捡东西、踢球、翻滚）
 

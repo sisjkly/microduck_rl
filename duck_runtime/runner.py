@@ -78,6 +78,9 @@ class Runner:
     # at 1.0 s still ~73 deg over and velstand (v8) finishes getting up by ~2.5 s (SimIO,
     # 835 g). robotd keeps driving after a fall by default, so it never needed this.
     post_move_grace_s: float = 2.5
+    # on_fall="keep": velstand v8 gets itself up (SimIO 835 g: 0.6-1.8 s from face/side/back).
+    # Still down after this long -> limp, so a stuck robot does not thrash on the floor.
+    getup_timeout_s: float | None = 5.0
 
     def __post_init__(self):
         self.state = State.LIMP
@@ -85,7 +88,10 @@ class Runner:
         self._command_t = -1e9
         self._ramp_from: np.ndarray | None = None
         self._ramp_t0 = 0.0
-        self.fall_events = 0
+        self.fall_events = 0          # falls that cut torque
+        self.falls_seen = 0           # every fall verdict while running (keep mode gets up)
+        self._was_fallen = False
+        self._run_t0 = 0.0
         self.refusal = ""
         self.stand_pose = DEFAULT_POSITION.copy()
         self.stand_pose[list(HEAD_JOINTS)] += np.asarray(self.head_offset, dtype=float)
@@ -160,11 +166,15 @@ class Runner:
         if self.state is not State.HOLD:
             return False
         s = self.io.read()
-        if not s.imu_ready or s.imu.gravity[2] > self.safety.fall_gravity_z:
-            self.refusal = "IMU not ready" if not s.imu_ready else "robot is not upright"
+        lying = s.imu.gravity[2] > self.safety.fall_gravity_z
+        if not s.imu_ready or (lying and self.on_fall != "keep"):
+            # With on_fall="keep" the policy may start from the floor: v8 gets up by itself.
+            self.refusal = ("IMU not ready" if not s.imu_ready
+                            else "robot is not upright (--keep-on-fall lets the policy get it up)")
             return False
         self.controller.reset()
         self._clear_moves()
+        self._run_t0 = s.t
         self.state = State.RUN
         return True
 
@@ -191,11 +201,19 @@ class Runner:
         fallen = self.safety.update_fall(s) if s.imu_ready else False
         obs = targets = None
 
+        if self.state is State.RUN and fallen and not self._was_fallen:
+            self.falls_seen += 1
         if (self.state is State.RUN and fallen and not (self.busy or self.sit == "sitting")
                 and s.t >= self._grace_until):
-            self.fall_events += 1
             if self.on_fall == "limp":
+                self.fall_events += 1
                 self.limp()
+            elif (self.getup_timeout_s is not None and self.safety._tilt_since is not None
+                  and s.t - max(self.safety._tilt_since, self._run_t0) > self.getup_timeout_s):
+                self.fall_events += 1
+                self.refusal = f"still down after {self.getup_timeout_s:.0f} s: limp"
+                self.limp()
+        self._was_fallen = fallen and self.state is State.RUN
 
         if self.state is State.RAMP:
             a = min(1.0, (s.t - self._ramp_t0) / max(self.ramp_s, 1e-6))

@@ -197,3 +197,25 @@ def test_limp_clears_moves(tmp_path):
     r.limp()
     assert r.sit == "up" and r.move is None and not r.busy
 
+
+
+def test_keep_on_fall_starts_from_the_floor_and_gives_up_after_the_timeout(tmp_path):
+    loader, nets = make_set(tmp_path)
+    s = load_set(str(tmp_path), loader=loader)
+    io = UprightIO()
+    io.gravity = np.array([0.0, -1.0, 0.0])                      # lying on its side
+    r = Runner(io, Controller(s.walk, Tuning.official()), ramp_s=0.02, policies=s)
+    r.enable(); r.run_for(0.1)
+    assert not r.start() and "keep-on-fall" in r.refusal          # default: refuse
+    r.on_fall = "keep"
+    drive(r, 300)                                                # lying 6 s in HOLD
+    assert r.start()                                             # keep: the policy may get it up
+    drive(r, 200)                                                # 4 s down: still trying
+    assert r.state is State.RUN and r.falls_seen == 1
+    io.gravity = np.array([0.0, 0.0, -1.0])                      # got up
+    drive(r, 50)
+    io.gravity = np.array([0.0, -1.0, 0.0])                      # falls again
+    drive(r, 200)
+    assert r.state is State.RUN and r.falls_seen == 2
+    drive(r, 70)                                                 # > 5 s down
+    assert r.state is State.LIMP and r.fall_events == 1 and "still down" in r.refusal

@@ -237,7 +237,7 @@ def test_runner_refuses_to_start_when_lying(sim_runner):
     r.run_for(3.0)          # unpowered: folds onto the floor
     r.enable(); r.run_for(0.8)
     assert r.state is State.HOLD
-    assert r.start() is False and r.refusal == "robot is not upright"
+    assert r.start() is False and r.refusal.startswith("robot is not upright")
     assert r.state is State.HOLD
 
 

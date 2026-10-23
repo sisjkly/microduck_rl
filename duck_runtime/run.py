@@ -77,7 +77,11 @@ def main(argv=None):
     ap.add_argument("--imu-port", default=None, help="feetech only: ESP32 IMU link port")
     ap.add_argument("--calib")
     ap.add_argument("--viewer", action="store_true", help="sim only")
-    ap.add_argument("--keep-on-fall", action="store_true", help="keep driving after a fall (official default)")
+    ap.add_argument("--keep-on-fall", action="store_true",
+                    help="keep driving after a fall so velstand v8 gets the robot up (official default); "
+                         "also lets 2 start the policy with the robot on the floor")
+    ap.add_argument("--getup-timeout", type=float, default=5.0,
+                    help="with --keep-on-fall: limp if still down after this many seconds (0 = never)")
     ap.add_argument("--log", help="write an .npz log of every tick on exit")
     ap.add_argument("--head-cmd", default="0,0,0,0",
                     help="head pose command, degrees from HOME: neck_pitch,head_pitch,head_yaw,head_roll "
@@ -123,7 +127,7 @@ def main(argv=None):
         ap.error("--policy or --set is required")
     runner = Runner(io, Controller(walk, tuning), safety,
                     on_fall="keep" if args.keep_on_fall else "limp", log=log, head_offset=head,
-                    policies=pset)
+                    policies=pset, getup_timeout_s=args.getup_timeout or None)
     viewer = None
     if args.viewer and args.backend == "sim" and os.environ.get("DISPLAY"):
         import mujoco.viewer
@@ -172,7 +176,7 @@ def main(argv=None):
                 if now - last_print > 0.5:
                     last_print = now
                     print(f"\r[{runner.state.value:4s} {runner.mode:10s}] cmd vx {vx:+.2f} vy {vy:+.2f} wz {wz:+.2f}  "
-                          f"falls {runner.fall_events}  {runner.refusal}   ", end="", flush=True)
+                          f"falls {runner.falls_seen}  {runner.refusal}   ", end="", flush=True)
                 if args.backend == "sim":  # real time for a human at the keyboard
                     time.sleep(max(0.0, io.control_dt - (time.monotonic() - t0)))
     except KeyboardInterrupt:

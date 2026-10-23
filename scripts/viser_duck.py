@@ -196,7 +196,7 @@ class DuckApp:
         return f"""<div style="font-size:0.9em;line-height:1.45;padding:0 1em 0.5em 1em;">
           <b>State</b> {state}<br/>
           <b>Pitch</b> {p:+.1f}°  <b>Roll</b> {rl:+.1f}°  <b>Height</b> {z * 100:.1f} cm<br/>
-          <b>Falls</b> {r.fall_events}  <b>Sim</b> {self.io.now():.1f} s  <b>Speed</b> {self.speed:g}x<br/>
+          <b>Falls</b> {r.falls_seen} (limped {r.fall_events})  <b>Sim</b> {self.io.now():.1f} s  <b>Speed</b> {self.speed:g}x<br/>
           <span style="color:#888;">{self.message}</span></div>"""
 
     def run(self) -> None:
