@@ -71,7 +71,7 @@ def test_official_manifest(tmp_path):
     assert list(s.skills) == ["ground_pick", "roulade", "kick_left", "kick_right"]  # roller entries skipped
     gp = s.skills["ground_pick"]
     assert gp.encoding == "phase" and gp.duration_s == pytest.approx(2.8) and gp.action_scale == 1.0
-    assert s.skills["kick_left"].duration_s == 0.5 and s.skills["kick_left"].action_scale is None
+    assert s.skills["kick_left"].duration_s == 0.5 and s.skills["kick_left"].action_scale == 1.0  # tuned scale
     assert s.skills["roulade"].duration_s == 1.0
     assert "roller" not in nets and "alpha_walking" not in nets
     assert bind_keys(s.skills) == {"g": "ground_pick", "r": "roulade", "k": "kick_left", "l": "kick_right"}

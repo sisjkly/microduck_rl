@@ -32,6 +32,7 @@ GROUND_PICK_ACTION_SCALE = 1.0
 SITSTAND_RAMP_S = 2.0
 SITSTAND_RISE_S = 1.0
 SITSTAND_ACTION_SCALE = 1.0
+STANDING_ACTION_SCALE = 1.0     # control.rs Tuning default; what the kicks were tuned at
 
 
 @dataclass
@@ -107,9 +108,13 @@ def load_set(directory: str, walk: str | None = None, sitstand: str | None = Non
         elif kind in ("episodic", "scripted") and enc == "constant":
             if e.get("duration_s") is None:
                 continue
+            twist = _twist(cmd.get("twist"))
+            scale = e.get("action_scale")
+            if scale is None and twist == (0.0, 0.0, 0.0):
+                scale = STANDING_ACTION_SCALE
             skills[name] = Skill(name, loader(path(fname)), duration_s=float(e["duration_s"]),
-                                 twist=_twist(cmd.get("twist")),
-                                 action_scale=None if e.get("action_scale") is None else float(e["action_scale"]),
+                                 twist=twist,
+                                 action_scale=None if scale is None else float(scale),
                                  unwind=_twist(cmd.get("idle")), unwind_s=float(e.get("unwind_s", 0.0)))
     if walk_file is None:
         raise ValueError(f"{directory}: no walk policy (manifest slot 'walk' or --policy)")
