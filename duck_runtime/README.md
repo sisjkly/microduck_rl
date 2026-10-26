@@ -175,6 +175,7 @@ duck duck_runtime.dashboard --calib calib.json --set policies --policy policies/
 
   他的部署参数是动作幅度 1.0、头/腿低通 0.5/0.7（`deployment-execution.json`），后者就是我们的默认值。
   仿真 835 g 对比（3 个种子）：零指令都站得住；vx=0.2 时 8 s 走 0.97 m（官方 0.9 幅度 0.58 m）。
+  **本机实测（2026-10-26）：换这个模型后零指令不晃了，推荐作为本机默认步态。**
   坐站、捡、踢、滚仍用官方网络。他的模型只限个人非商业使用（见他仓库的 LICENSE）。
 
 ## 先在电脑上预演
