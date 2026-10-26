@@ -218,7 +218,7 @@ def cmd_relax(args):
         b.close()
 
 
-def servo_register_rows(b, ids) -> list[str]:
+def servo_register_rows(b, ids, torque_mask: int | None = None) -> list[str]:
     """One native read of HD1910 registers 21..52 per servo (read-only, works with torque on).
     21-23 EEPROM P/D/I, 26/27 dead zone, 41 acceleration, 46-47 goal speed, 48-49 torque
     limit, 50-52 RAM P/D/I (what the servo runs with). kissqy control.43 fixed his body jitter
@@ -233,7 +233,8 @@ def servo_register_rows(b, ids) -> list[str]:
         at = lambda a: r[a - 21]
         u16 = lambda a: struct.unpack_from("<H", r, a - 21)[0]
         flag = []
-        if at(51) != 0:
+        on = torque_mask is None or bool(torque_mask >> (i - 1) & 1)
+        if at(51) != 0 and on:              # torque off: the power-up gains, restored on exit
             flag.append("RAM D!=0")
         if u16(48) < 1000:
             flag.append("torque limit<1000")
@@ -251,11 +252,13 @@ def cmd_regs(args):
     b = Bridge(_port(args))
     try:
         ids = b.served_ids()
-        print(f"served IDs {list(ids)}")
-        for line in servo_register_rows(b, ids):
+        mask = b.status()["torque_mask"]
+        print(f"served IDs {list(ids)}, torque mask 0x{mask:04x}")
+        for line in servo_register_rows(b, ids, mask):
             print(line)
-        print("RAM D/torque limit: duck_runtime writes P=5 D=0 at every torque-on (NPD1); "
-              "the torque limit is left as the servo powered up with.")
+        print("Torque off -> RAM shows the power-up gains (HD1910: 32/40): duck_runtime writes P=5 D=0 and reads\n"
+              "them back before every torque-on (bridge.py set_torque: refuses torque otherwise), and restores the\n"
+              "power-up gains when it exits. The torque limit is never written: it stays as the servo powered up.")
     finally:
         b.close()
 

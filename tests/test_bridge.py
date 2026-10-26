@@ -636,3 +636,12 @@ def test_regs_dump_flags_native_d_and_torque_limit():
         fake.alive = False
     assert len(rows) == 3
     assert "RAM P/D/I  32/ 40/  0" in rows[0] and "RAM D!=0" in rows[0] and "torque limit<1000" in rows[0]
+    master, slave = pty.openpty()
+    fake = FakeBridge(master, n_servos=3)
+    b = B.Bridge(os.ttyname(slave))
+    try:
+        idle = servo_register_rows(b, b.served_ids(), torque_mask=0)   # power-up gains with torque off: fine
+    finally:
+        b.close()
+        fake.alive = False
+    assert "RAM D!=0" not in idle[0]
