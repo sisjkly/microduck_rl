@@ -8,11 +8,14 @@
 
   # the official set (sit/stand, ground pick, kicks, roulade): the Hub repo in policies/
   python -m duck_runtime.run --calib calib.json --set policies
+  # two sets, switch with p: kissqy's HD1910-trained one (duck_runtime.fetch_set kissqy) first
+  python -m duck_runtime.run --calib calib.json --set policies_hd1910 --set policies
 
 Keys:  1 enable (torque on, ease to HOME)   2 start policy   3 stop (back to HOME)
        0 limp (torque off)                  w/s vx +-0.05    z/c vy +-0.05
        a/d yaw +-0.2                        space zero command
   with --set:  x sit / stand    g ground pick    k / l kick left / right    r roulade
+       p next policy set (several --set; only with the policy stopped: 3 first)
        m open / close the mouth (when calib.json gives the mouth a servo: tools mouth)
        Ctrl+C: limp and exit.  The policy needs >= ~0.2 m/s to start stepping.
 """
@@ -27,6 +30,7 @@ import sys
 import termios
 import time
 import tty
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -63,9 +67,12 @@ class Keys:
 def add_runner_args(ap: argparse.ArgumentParser) -> None:
     """Robot / policy / safety options shared by the terminal driver and the dashboard."""
     ap.add_argument("--backend", choices=["bridge", "feetech", "sim"], default="bridge")
-    ap.add_argument("--policy", help="61->14 ONNX gait (e.g. official velstand.onnx); with --set: overrides its walk slot")
-    ap.add_argument("--set", dest="policy_set", help="directory with the official set's manifest.json + .onnx "
-                    "(sit/stand, ground pick, kicks, roulade)")
+    ap.add_argument("--policy", help="61->14 ONNX gait (e.g. official velstand.onnx); with --set: overrides the "
+                    "walk slot of the first set")
+    ap.add_argument("--set", dest="policy_set", action="append",
+                    help="directory with a set's manifest.json + .onnx (sit/stand, ground pick, kicks, roulade); "
+                         "give it twice (e.g. --set policies --set policies_hd1910) to switch between sets: "
+                         "key p in the terminal, the selector on the dashboard; the first one starts active")
     ap.add_argument("--rise-s", type=float, default=None,
                     help="with --set: seconds the sit/stand network drives the rise (manifest: 1.0)")
     ap.add_argument("--sitstand", help="with --set: another sit/stand network (twist vx = sit flag), "
@@ -93,8 +100,74 @@ def add_runner_args(ap: argparse.ArgumentParser) -> None:
                          "(also used for the stand pose before the policy starts)")
 
 
+@dataclass
+class LoadedSet:
+    """One policy set and the gait tuning it runs with."""
+    label: str
+    path: str
+    pset: object                    # PolicySet
+    keys: dict                      # key -> skill name
+    tuning: Tuning
+
+    def summary(self) -> str:
+        p = self.pset
+        return (f"{self.label}: walk {p.walk_file} (scale {self.tuning.action_scale:g}, low-pass "
+                f"{self.tuning.head_lowpass}/{self.tuning.legs_lowpass}), sit/stand {'x' if p.sitstand else '-'}, "
+                f"skills " + (", ".join(f"{k}={n}" for k, n in self.keys.items()) or "-"))
+
+
+class SetBank:
+    """The sets given with --set; ``active`` is the one the runner drives."""
+
+    def __init__(self, sets: list[LoadedSet]):
+        self.sets, self.index = sets, 0
+
+    @property
+    def active(self) -> LoadedSet | None:
+        return self.sets[self.index] if self.sets else None
+
+    def find(self, label: str) -> int | None:
+        for i, ls in enumerate(self.sets):
+            if ls.label == label:
+                return i
+        return None
+
+    def switch(self, runner: Runner, index: int) -> str | None:
+        """Make set ``index`` active. None = done, else the refusal (policy running)."""
+        if not 0 <= index < len(self.sets):
+            return f"no set #{index}"
+        ls = self.sets[index]
+        why = runner.swap_policies(ls.pset, ls.tuning)
+        if why is None:
+            self.index = index
+        return why
+
+
+def _set_label(path: str, pset) -> str:
+    base = os.path.basename(os.path.normpath(path)) or path
+    return f"{base} ({pset.servos})" if getattr(pset, "servos", "") else base
+
+
+def load_sets(args, ap: argparse.ArgumentParser, base_tuning: Tuning) -> SetBank:
+    from .policy_set import apply_walk_tuning, bind_keys, load_set
+    paths = args.policy_set or []
+    sets: list[LoadedSet] = []
+    for i, path in enumerate(paths):
+        pset = load_set(path, walk=args.policy if i == 0 else None, sitstand=args.sitstand if i == 0 else None)
+        if args.rise_s is not None and pset.sitstand is not None:
+            pset.sitstand.rise_s = args.rise_s
+        tuning = replace(base_tuning)
+        if args.tuning == "official":       # the set's own gait settings (kissqy: 1.0, 0.5 / 0.7)
+            apply_walk_tuning(pset, tuning, args.action_scale)
+        label = _set_label(path, pset)
+        if any(s.label == label for s in sets):
+            label = f"{label} #{i + 1}"
+        sets.append(LoadedSet(label, path, pset, bind_keys(pset.skills), tuning))
+    return SetBank(sets)
+
+
 def build_runner(args, ap: argparse.ArgumentParser):
-    """-> (runner, io, policy set or None, {key: skill name}, head offset) from parsed args."""
+    """-> (runner, io, set bank, head offset) from parsed args. ``bank.active`` is None with --policy only."""
     tuning = Tuning.official() if args.tuning == "official" else Tuning.as_trained()
     if args.action_scale is not None:
         tuning.action_scale = args.action_scale
@@ -117,27 +190,19 @@ def build_runner(args, ap: argparse.ArgumentParser):
     head = tuple(math.radians(float(v)) for v in args.head_cmd.split(","))
     if len(head) != 4:
         ap.error("--head-cmd needs 4 values")
-    pset, skill_keys = None, {}
-    if args.policy_set:
-        from .policy_set import apply_walk_tuning, bind_keys, load_set
-        pset = load_set(args.policy_set, walk=args.policy, sitstand=args.sitstand)
-        skill_keys = bind_keys(pset.skills)
-        if args.rise_s is not None and pset.sitstand is not None:
-            pset.sitstand.rise_s = args.rise_s
-        walk = pset.walk
-        if args.tuning == "official":       # the set's own gait settings (kissqy: 1.0, 0.5 / 0.7)
-            apply_walk_tuning(pset, tuning, args.action_scale)
-        print(f"policy set {args.policy_set}: walk {pset.walk_file} (scale {tuning.action_scale:g}), sit/stand "
-              f"{'x' if pset.sitstand else '-'}, skills "
-              + (", ".join(f"{k}={n} ({pset.skills[n].duration_s:.1f} s)" for k, n in skill_keys.items()) or "-"))
+    bank = load_sets(args, ap, tuning)
+    if bank.active is not None:
+        for i, ls in enumerate(bank.sets):
+            print(("* " if i == 0 else "  ") + ls.summary())
+        walk, tuning, pset = bank.active.pset.walk, bank.active.tuning, bank.active.pset
     elif args.policy:
-        walk = Policy(args.policy)
+        walk, pset = Policy(args.policy), None
     else:
         ap.error("--policy or --set is required")
     runner = Runner(io, Controller(walk, tuning), safety,
                     on_fall=args.on_fall or ("keep" if args.keep_on_fall else "limp"), log=log, head_offset=head,
                     policies=pset, getup_timeout_s=args.getup_timeout or None)
-    return runner, io, pset, skill_keys, head
+    return runner, io, bank, head
 
 
 def save_log(path: str, log: list[TickLog]) -> None:
@@ -157,7 +222,7 @@ def main(argv=None):
     ap.add_argument("--viewer", action="store_true", help="sim only")
     ap.add_argument("--log", help="write an .npz log of every tick on exit")
     args = ap.parse_args(argv)
-    runner, io, pset, skill_keys, head = build_runner(args, ap)
+    runner, io, bank, head = build_runner(args, ap)
     log = runner.log
     viewer = None
     if args.viewer and args.backend == "sim" and os.environ.get("DISPLAY"):
@@ -195,13 +260,17 @@ def main(argv=None):
                     elif k == "m":
                         from .contract import MOUTH_CLOSED
                         runner.mouth_target = MOUTH_OPEN if runner.mouth_target <= MOUTH_CLOSED + 1e-6 else MOUTH_CLOSED
-                    elif k == "x" and pset is not None:
+                    elif k == "x" and bank.active is not None:
                         why = runner.sit_toggle()
                         print(f"\n[{'sit/stand' if why is None else 'refused'}] {why or runner.sit}")
-                    elif k in skill_keys:
+                    elif k == "p" and len(bank.sets) > 1:
+                        why = bank.switch(runner, (bank.index + 1) % len(bank.sets))
+                        print(f"\n[{'set' if why is None else 'refused'}] {why or bank.active.summary()}")
+                    elif bank.active is not None and k in bank.active.keys:
                         vx = vy = wz = 0.0           # a move starts from standing; walk resumes at zero
-                        why = runner.trigger(skill_keys[k])
-                        print(f"\n[{'skill' if why is None else 'refused'}] {why or skill_keys[k]}")
+                        name = bank.active.keys[k]
+                        why = runner.trigger(name)
+                        print(f"\n[{'skill' if why is None else 'refused'}] {why or name}")
                 runner.set_command(Command(twist=(vx, vy, wz), head=head), io.now())
                 runner.tick()
                 if viewer is not None:

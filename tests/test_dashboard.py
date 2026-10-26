@@ -21,15 +21,24 @@ TOKEN = "t0k"
 
 @pytest.fixture()
 def dash(tmp_path):
+    from duck_runtime.fetch_set import kissqy_manifest
+    from duck_runtime.policy_set import apply_walk_tuning
+    from duck_runtime.run import LoadedSet, SetBank
     (tmp_path / "set").mkdir()
+    (tmp_path / "hd1910").mkdir()
     loader, nets = make_set(tmp_path / "set")
     pset = load_set(str(tmp_path / "set"), loader=loader)
+    loader2, nets2 = make_set(tmp_path / "hd1910", manifest=kissqy_manifest())
+    pset2 = load_set(str(tmp_path / "hd1910"), loader=loader2)
+    bank = SetBank([LoadedSet("set (xl330)", "set", pset, bind_keys(pset.skills), Tuning.official()),
+                    LoadedSet("hd1910 (hd1910)", "hd1910", pset2, bind_keys(pset2.skills),
+                              apply_walk_tuning(pset2, Tuning.official()))])
     io = UprightIO()
     io.voltages = np.full(15, 7.4)
     io.currents = np.full(15, 100.0)
     io.temperatures = np.full(15, 40.0)
     r = Runner(io, Controller(pset.walk, Tuning.official()), ramp_s=0.02, policies=pset)
-    d = Dashboard(r, io, pset, bind_keys(pset.skills), (0.0, 0.0, 0.0, 0.0), backend="test",
+    d = Dashboard(r, io, bank, (0.0, 0.0, 0.0, 0.0), backend="test",
                   log_dir=str(tmp_path / "logs"), token=TOKEN, realtime=True)
     server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(d))
     server.daemon_threads = True
@@ -38,6 +47,7 @@ def dash(tmp_path):
     loop.start()
     d.port = server.server_address[1]
     d.nets = nets
+    d.nets2 = nets2
     yield d
     d.shutdown()
     loop.join(2)
@@ -167,3 +177,28 @@ def test_mouth_endpoint_clamps_and_reports_no_servo(dash):
     st, info = call(dash, "GET", "/api/info")
     assert info["mouth"] == {"servo": False, "range_deg": [-5.0, 30.0]}
     assert call(dash, "POST", "/api/mouth", {"deg": -5})[1]["deg"] == -5.0
+
+
+def test_two_sets_switch_only_with_the_policy_stopped(dash):
+    st, info = call(dash, "GET", "/api/info")
+    assert [x["label"] for x in info["sets"]] == ["set (xl330)", "hd1910 (hd1910)"] and info["sets"][0]["active"]
+    assert info["sets"][1]["action_scale"] == 1.0 and info["sets"][1]["servos"] == "hd1910"
+    call(dash, "POST", "/api/action", {"action": "enable"})
+    assert wait_for(lambda: dash.runner.state is State.HOLD)
+    call(dash, "POST", "/api/action", {"action": "start"})
+    st, body = call(dash, "POST", "/api/action", {"action": "set", "name": "hd1910 (hd1910)"})
+    assert not body["ok"] and "stop the policy" in body["error"]
+    assert dash.runner.controller.policy is dash.nets["velstand"]
+    call(dash, "POST", "/api/action", {"action": "stop"})
+    assert wait_for(lambda: dash.runner.state is State.HOLD)
+    st, body = call(dash, "POST", "/api/action", {"action": "set", "name": "hd1910 (hd1910)"})
+    assert body["ok"]
+    r = dash.runner
+    assert r.controller.policy is dash.nets2["kissqy_velstand"] and r.policies.skills["kick_left"].lowpass == (1.0, 1.0)
+    assert r.controller.tuning.action_scale == 1.0
+    assert frame(dash, lambda f: f["set"] == "hd1910 (hd1910)")["state"] == "hold"
+    call(dash, "POST", "/api/action", {"action": "start"})
+    call(dash, "POST", "/api/action", {"action": "skill", "name": "kick_right"})
+    assert wait_for(lambda: len(dash.nets2["kissqy_kick_right"].seen) > 0)
+    assert len(dash.nets["ball_kick_right"].seen) == 0
+    assert call(dash, "POST", "/api/action", {"action": "set", "name": "nope"})[1]["ok"] is False

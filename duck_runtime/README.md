@@ -178,6 +178,36 @@ duck duck_runtime.dashboard --calib calib.json --set policies --policy policies/
   **本机实测（2026-10-26）：换这个模型后零指令不晃了，推荐作为本机默认步态。**
   坐站、捡、踢、滚仍用官方网络。他的模型只限个人非商业使用（见他仓库的 LICENSE）。
 
+### 5. 两套模型：kissqy（HD1910 自训）和官方，随时切换
+
+kissqy 整套都是按 HD1910 训练的（P=5、820 g、官方观测约定和 HOME，逐个核对过）：走路、坐站、捡、左右踢、翻滚。
+在鸭子上一条命令下载（他仓库里的固件包，约 34 MB；六个模型都按 SHA-256 校验）并生成清单：
+
+```bash
+cd ~/microduck_rl && git pull
+duck duck_runtime.fetch_set kissqy            # -> policies_hd1910/（manifest.json + 6 个 onnx）
+duck duck_runtime.dashboard --calib calib.json --set policies_hd1910 --set policies --on-fall getup
+```
+
+- `--set` 给两次 = 两套都加载，第一个是启动时用的那套。面板“动作”卡片里的“模型套”下拉框，或键 `p` 切换；
+  终端版 `duck_runtime.run` 也是 `p`。**只有策略停止时能切**（先按 3），正在走的步态不会中途换网络。
+- 每套用它自己的部署参数（清单里写着，`policy_set.py` 读）：
+  官方 = 步态幅度 0.9、全局低通 0.5/0.7；kissqy = 步态幅度 1.0、低通 0.5/0.7，捡/踢/滚幅度 1.0 且**不加低通**
+  （他的 V167 就这么跑），坐站走全局低通。`--action-scale` 显式给了就对两套都生效；`--policy` 只替换第一套的步态。
+- 仿真对比（835 g，6 个种子，`scripts/rehearse_set.py --on-fall getup`，“站稳”= 5 s 后直立）：
+
+| 动作 | 理想供电 官方 / kissqy | 本机压降模型 官方 / kissqy | 满电 8.4 V（同样线路）官方 / kissqy |
+|---|---|---|---|
+| 坐下站起 | 6/6 / 6/6 | 6/6 / 6/6 | — |
+| 捡东西 | 6/6 / 6/6 | 6/6 / 6/6 | — |
+| 翻滚 | 4/6 / **6/6** | 0/6 / 0/6 | 0/6 / **5/6** |
+| 左踢 | 6/6 / 6/6 | **6/6** / 0/6 | 6/6 / 6/6 |
+| 右踢 | 6/6 / 6/6 | **6/6** / 0/6 | 6/6 / 5/6 |
+
+  kissqy 的踢腿对掉压更敏感（给它加上全局低通也一样倒，所以不是滤波的事），翻滚比官方好；腿上的供电线路修好之前，
+  踢腿先用官方那套。零指令站立 kissqy 的步态在真机上不晃（2026-10-26），这是推荐默认用它的原因。
+- 他的模型只限个人非商业使用（见他仓库的 LICENSE）；`fetch_set` 不把模型放进本仓库，只在鸭子上下载。
+
 ## 先在电脑上预演
 
 在电脑上（不是鸭子上）：`git clone -b ours-813g-hd1910 https://github.com/sisjkly/microduck_rl.git && cd microduck_rl && uv sync`

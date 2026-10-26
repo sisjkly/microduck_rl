@@ -5,6 +5,8 @@ the keyboard. One process owns the hardware: stop ``duck_runtime.run`` first.
 
   # on the robot (Pi), then open the printed URL from any computer on the same network
   duck duck_runtime.dashboard --calib calib.json --set policies --keep-on-fall
+  # two sets, switched from the page while the policy is stopped (first one starts active)
+  duck duck_runtime.dashboard --calib calib.json --set policies_hd1910 --set policies --on-fall getup
   # rehearse on a PC with the simulated duck (and this robot's battery sag)
   uv run python -m duck_runtime.dashboard --backend sim --set policies --supply robot
 
@@ -66,10 +68,9 @@ def pitch_roll(g) -> tuple[float, float]:
 class Dashboard:
     """Owns the control loop (call ``run`` on the main thread); HTTP threads only queue work."""
 
-    def __init__(self, runner, io, pset, skill_keys: dict, head, *, backend: str, log_dir: str,
+    def __init__(self, runner, io, bank, head, *, backend: str, log_dir: str,
                  token: str | None, realtime: bool, calib_path: str | None = None):
-        self.runner, self.io, self.pset = runner, io, pset
-        self.skill_keys = skill_keys
+        self.runner, self.io, self.bank = runner, io, bank
         self.head_offset = head
         self.backend = backend
         self.realtime = realtime
@@ -93,6 +94,16 @@ class Dashboard:
         self.clients = 0
         self._prev = {}
         self.started = time.time()
+
+    @property
+    def pset(self):
+        a = self.bank.active
+        return a.pset if a is not None else None
+
+    @property
+    def skill_keys(self) -> dict:
+        a = self.bank.active
+        return a.keys if a is not None else {}
 
     # -- called from HTTP threads ------------------------------------------------------------
     def submit(self, fn) -> dict:
@@ -175,6 +186,21 @@ class Dashboard:
         if name == "skill":
             skill = str(body.get("name", ""))
             return self.submit(lambda: (zero_twist(), outcome(r.trigger(skill), skill))[1])
+        if name == "set":
+            label = str(body.get("name", ""))
+
+            def switch():
+                i = self.bank.find(label)
+                if i is None:
+                    return {"ok": False, "error": f"no policy set {label!r}"}
+                if i == self.bank.index:
+                    return {"ok": True}
+                zero_twist()
+                res = outcome(self.bank.switch(r, i), f"policy set -> {label}")
+                if res["ok"]:
+                    self.log_event("info", self.bank.active.summary())
+                return res
+            return self.submit(switch)
         if name not in jobs:
             return {"ok": False, "error": f"unknown action {name!r}"}
         if name == "limp":                      # never queue an emergency stop behind anything
@@ -245,6 +271,10 @@ class Dashboard:
             "calib": self.calib_path, "joints": joints, "limits": LIMITS,
             "policy": {"walk": getattr(self.pset, "walk_file", None) if self.pset else "single policy",
                        "sitstand": bool(self.pset and self.pset.sitstand), "skills": skills},
+            "sets": [{"label": ls.label, "path": ls.path, "active": i == self.bank.index,
+                      "servos": getattr(ls.pset, "servos", ""), "description": getattr(ls.pset, "description", ""),
+                      "action_scale": ls.tuning.action_scale}
+                     for i, ls in enumerate(self.bank.sets)],
             "head_offset_deg": [round(math.degrees(v), 1) for v in self.head_offset],
             "control_hz": round(1.0 / self.io.control_dt),
             "tuning": {"action_scale": r.controller.tuning.action_scale},
@@ -317,6 +347,7 @@ class Dashboard:
         return {
             "seq": self.frame_seq, "wall": time.time(), "t": _num(io.now(), 2),
             "state": r.state.value, "mode": r.mode if r.state is State.RUN else "",
+            "set": self.bank.active.label if self.bank.active is not None else None,
             "sit": r.sit, "busy": r.busy, "move": mv, "refusal": r.refusal,
             "falls": r.falls_seen, "limped": r.fall_events,
             "on_fall": r.on_fall, "getup_timeout_s": r.getup_timeout_s,
@@ -498,9 +529,9 @@ def main(argv=None):
     ap.add_argument("--log-dir", default="logs", help="where recordings are written")
     args = ap.parse_args(argv)
 
-    runner, io, pset, skill_keys, head = build_runner(args, ap)
+    runner, io, bank, head = build_runner(args, ap)
     token = None if args.no_token else (args.token or secrets.token_urlsafe(9))
-    dash = Dashboard(runner, io, pset, skill_keys, head, backend=args.backend, log_dir=args.log_dir,
+    dash = Dashboard(runner, io, bank, head, backend=args.backend, log_dir=args.log_dir,
                      token=token, realtime=args.backend == "sim", calib_path=args.calib)
     if args.backend == "sim":
         runner.enable()                       # nobody is holding a simulated duck

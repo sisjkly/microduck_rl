@@ -352,3 +352,36 @@ def test_lowpass_out_of_range_is_refused(tmp_path):
     loader, _ = make_set(tmp_path, manifest=m)
     with pytest.raises(ValueError, match="lowpass"):
         load_set(str(tmp_path), loader=loader)
+
+
+def test_load_sets_two_dirs_first_active_policy_override_on_the_first_only(tmp_path, monkeypatch):
+    import argparse
+    import duck_runtime.policy_set as ps
+    from duck_runtime.fetch_set import kissqy_manifest
+    from duck_runtime.run import add_runner_args, load_sets
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies_hd1910").mkdir()
+    loader, nets = make_set(tmp_path / "policies")
+    loader2, nets2 = make_set(tmp_path / "policies_hd1910", manifest=kissqy_manifest())
+    real_load_set = ps.load_set
+    monkeypatch.setattr(ps, "load_set", lambda d, **kw: real_load_set(
+        d, loader=lambda path: (loader2 if "hd1910" in path else loader)(path), **kw))
+    ap = argparse.ArgumentParser()
+    add_runner_args(ap)
+    args = ap.parse_args(["--set", str(tmp_path / "policies_hd1910"), "--set", str(tmp_path / "policies")])
+    bank = load_sets(args, ap, Tuning.official())
+    assert [s.label for s in bank.sets] == ["policies_hd1910 (hd1910)", "policies (xl330)"]
+    assert bank.active.label.startswith("policies_hd1910") and bank.active.tuning.action_scale == 1.0
+    assert bank.sets[1].tuning.action_scale == 0.9                # official: global tuning untouched
+    assert bank.sets[0].tuning is not bank.sets[1].tuning
+    r = Runner(UprightIO(), Controller(bank.active.pset.walk, bank.active.tuning), ramp_s=0.02,
+               policies=bank.active.pset)
+    r.enable(); r.tick(); r.tick()
+    assert r.start() and bank.switch(r, 1) is not None           # running: refused
+    r.stop()
+    assert bank.switch(r, 1) is None and r.controller.policy is nets["velstand"] and bank.index == 1
+    assert r.controller.tuning.action_scale == 0.9
+    args = ap.parse_args(["--set", str(tmp_path / "policies"), "--set", str(tmp_path / "policies_hd1910"),
+                          "--action-scale", "0.8"])
+    bank = load_sets(args, ap, Tuning.official())
+    assert [s.tuning.action_scale for s in bank.sets] == [0.8, 0.8]   # an explicit override wins everywhere

@@ -74,6 +74,7 @@ class PolicySet:
     walk_action_scale: float | None = None      # from the manifest's walk entry, if it says
     walk_lowpass: tuple[float, float] | None = None
     description: str = ""
+    servos: str = ""                            # manifest robot.servos: xl330 (official) / hd1910
 
 
 def _lowpass(e: dict) -> tuple[float, float] | None:
@@ -151,7 +152,8 @@ def load_set(directory: str, walk: str | None = None, sitstand: str | None = Non
         ss = SitStand(loader(path(sitstand)))
     return PolicySet(loader(path(walk_file)), walk_file, ss, skills,
                      walk_action_scale=walk_scale, walk_lowpass=walk_lp,
-                     description=str(man.get("description", "")))
+                     description=str(man.get("description", "")),
+                     servos=str((man.get("robot") or {}).get("servos", "")))
 
 
 def apply_walk_tuning(pset: PolicySet, tuning, action_scale_override: float | None = None):

@@ -235,6 +235,20 @@ class Runner:
         self.state = State.LIMP
         self._clear_moves()
 
+    def swap_policies(self, policies, tuning=None) -> str | None:
+        """Another policy set (official / kissqy...) with its gait tuning. Only while no network
+        drives the body (LIMP / RAMP / HOLD): a running gait is never switched mid-step.
+        None = done, else the refusal."""
+        if self.state is State.RUN:
+            return "stop the policy first (3), then switch"
+        self.policies = policies
+        self.controller.policy = policies.walk
+        if tuning is not None:
+            self.controller.tuning = tuning
+        self.controller.reset()
+        self._clear_moves()
+        return None
+
     def set_command(self, command: Command, now: float) -> None:
         self.command = command
         self._command_t = now

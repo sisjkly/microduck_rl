@@ -147,6 +147,10 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin:
     </div>
     <div class="card">
       <h2>动作</h2>
+      <div class="slider" id="setRow" style="grid-template-columns: 110px minmax(0,1fr); display:none; margin-bottom:8px">
+        <label>模型套</label>
+        <select id="policySet" title="停止策略（3）后才能切换；键 p"></select>
+      </div>
       <div class="row" id="moves"></div>
       <div class="muted" id="movesNote" style="margin-top:6px"></div>
     </div>
@@ -162,7 +166,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin:
       </div>
       <div class="keys">键盘：<kbd>1</kbd> 上力矩 <kbd>2</kbd> 启动 <kbd>3</kbd> 停止 <kbd>0</kbd> 卸力 ·
         <kbd>w</kbd>/<kbd>s</kbd> 前后 <kbd>z</kbd>/<kbd>c</kbd> 左右 <kbd>a</kbd>/<kbd>d</kbd> 转向 <kbd>空格</kbd> 清零 ·
-        <kbd>x</kbd> 坐/站 <kbd>g</kbd> 捡 <kbd>k</kbd>/<kbd>l</kbd> 踢 <kbd>r</kbd> 翻滚 <kbd>m</kbd> 张嘴</div>
+        <kbd>x</kbd> 坐/站 <kbd>g</kbd> 捡 <kbd>k</kbd>/<kbd>l</kbd> 踢 <kbd>r</kbd> 翻滚 <kbd>m</kbd> 张嘴 ·
+        <kbd>p</kbd> 换模型套（先停止）</div>
     </div>
   </section>
 
@@ -276,6 +281,11 @@ async function sendCmd() {
 // Heartbeat: the robot zeroes the twist 0.5 s after the last command, so a closed tab stops it.
 setInterval(() => { if (document.visibilityState === "visible" && !(info && info.token_required && !token)) sendCmd(); }, 200);
 $("onFall").onchange = () => post("/api/settings", { on_fall: $("onFall").value });
+$("policySet").onchange = async () => {
+  const j = await act("set", { name: $("policySet").value });
+  await loadInfo();                       // the select snaps back if the switch was refused
+  if (!j.ok && j.error) $("refusal").textContent = "切换模型套：" + j.error;
+};
 $("getup").onchange = () => post("/api/settings", { getup_timeout_s: parseFloat($("getup").value) || 0 });
 $("rec").onclick = async () => {
   const on = !(frame && frame.recording && frame.recording.on);
@@ -287,7 +297,14 @@ const KEYS = { "1": () => act("enable"), "2": () => act("start"), "3": () => act
   w: () => setAxis("vx", cmd.vx + 0.05), s: () => setAxis("vx", cmd.vx - 0.05),
   z: () => setAxis("vy", cmd.vy + 0.05), c: () => setAxis("vy", cmd.vy - 0.05),
   a: () => setAxis("wz", cmd.wz + 0.2), d: () => setAxis("wz", cmd.wz - 0.2), " ": zero,
-  x: () => act("sit"), m: () => setMouth(cmd.mouth > -4 ? -5 : 25) };
+  x: () => act("sit"), m: () => setMouth(cmd.mouth > -4 ? -5 : 25), p: nextSet };
+async function nextSet() {
+  const sets = (info && info.sets) || [];
+  if (sets.length < 2) return;
+  const i = sets.findIndex((st) => st.active);
+  $("policySet").value = sets[(i + 1) % sets.length].label;
+  $("policySet").onchange();
+}
 cmd.mouth = -5;
 function setMouth(v) {
   cmd.mouth = +v; $("mouth").value = v; $("moutho").textContent = v <= -4.5 ? "闭" : `${(+v).toFixed(0)}°`;
@@ -304,6 +321,16 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------- static info ----------
+function setName(st) {
+  const who = st.servos === "hd1910" ? "kissqy（HD1910 自训）" : st.servos === "xl330" ? "官方（XL330）" : st.label;
+  return `${who} · 幅度 ${st.action_scale}`;
+}
+function buildSets() {
+  const sets = info.sets || [];
+  $("setRow").style.display = sets.length > 1 ? "" : "none";
+  $("policySet").innerHTML = sets.map((st) =>
+    `<option value="${st.label.replace(/"/g, "&quot;")}"${st.active ? " selected" : ""}>${setName(st)}</option>`).join("");
+}
 function buildMoves() {
   const box = $("moves"); box.innerHTML = "";
   const p = info.policy;
@@ -345,7 +372,7 @@ async function loadInfo() {
     (info.calib ? ` · ${info.calib}` : "");
   $("onFall").value = info.on_fall; $("getup").value = info.getup_timeout_s || 0;
   if (info.token_required && !token) banner("没有控制权限：请用机器人终端上打印的带 token 的地址打开本页。");
-  buildMoves(); buildJoints(); buildLadder();
+  buildSets(); buildMoves(); buildJoints(); buildLadder();
   const ms = info.mouth && info.mouth.servo;
   $("mouth").disabled = !ms;
   $("mouthNote").textContent = ms ? "键 m：张嘴/闭嘴" : "嘴没有接舵机：刷 15 舵机桥固件后用 tools mouth 标定（见 README）";
@@ -420,8 +447,14 @@ const fmt = (v, d = 1) => v == null ? "—" : (+v).toFixed(d);
 function cls(v, warn, bad, low) { if (v == null) return ""; if (low) return v < bad ? "x" : v < warn ? "w" : ""; return v > bad ? "x" : v > warn ? "w" : ""; }
 function cell(td, text, c) { td.textContent = text; td.className = c || ""; }
 const STATE_CN = { limp: "卸力", ramp: "回 HOME", hold: "站立待命", run: "策略运行" };
+let infoReloading = false;
 function render(f) {
   frame = f; lastFrameAt = performance.now();
+  if (info && info.sets && f.set != null && !infoReloading) {          // switched (here, a key, another tab)
+    const cur = info.sets.find((st) => st.active);
+    if (cur && cur.label !== f.set) { infoReloading = true; loadInfo().finally(() => { infoReloading = false; }); }
+  }
+  $("policySet").disabled = f.state === "run";
   const st = f.state;
   $("state").textContent = (STATE_CN[st] || st) + (f.mode ? " · " + f.mode : "");
   $("stateDot").className = "dot " + (st === "run" ? "ok" : st === "limp" ? "" : "warn");
