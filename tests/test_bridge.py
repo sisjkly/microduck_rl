@@ -622,3 +622,17 @@ def test_lost_link_limps_and_reconnects_instead_of_crashing():
     finally:
         fake.alive = False
         io.close()
+
+
+def test_regs_dump_flags_native_d_and_torque_limit():
+    from duck_runtime.tools import servo_register_rows
+    master, slave = pty.openpty()
+    fake = FakeBridge(master, n_servos=3)
+    b = B.Bridge(os.ttyname(slave))
+    try:
+        rows = servo_register_rows(b, b.served_ids())
+    finally:
+        b.close()
+        fake.alive = False
+    assert len(rows) == 3
+    assert "RAM P/D/I  32/ 40/  0" in rows[0] and "RAM D!=0" in rows[0] and "torque limit<1000" in rows[0]

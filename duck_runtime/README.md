@@ -152,6 +152,31 @@ cd ~/microduck_rl
 duck duck_runtime.run --calib calib.json --set policies --log set1.npz
 ```
 
+### 4. 零指令站着一直晃（约 2.8 Hz）
+
+现象（dash_1026 / set5 / set6 的零指令段）：机身前后晃，俯仰角速度标准差 3–7°/s，主峰 2.7–2.9 Hz；
+踝关节目标来回抖约 ±1°，实际位置只跟 ±0.1–0.2°，膝盖不动。只保持 HOME（策略没启动）时 IMU 只有 0.05–0.4°/s，
+所以是策略和真机舵机构成的闭环在振荡，不是传感器噪声。仿真（835 g、HD1910，再加 3–8 倍摩擦、到 100 ms 延迟、
+2° 齿隙）都复现不出来：官方 velstand 是按 XL330 训练的，本机舵机和它不一样。
+
+- kissqy 的“修复鸭身抖动”（control.43，`duck-control/src/hd1910.rs` 的 `write_fixed_settings`）只做了一件事：
+  上力矩时把 RAM 里的 D 写成 0（地址 51），扭矩上限写成 1000（地址 48）。HD1910 出厂 RAM 是 P/D = 32/40，
+  他之前的版本没写 D，所以 D=40 一直生效。**我们每次上力矩都写 P=5、D=0 并读回校验**（`bridge.py` `set_torque`），
+  这一条早就有了。扭矩上限我们不写，用 `duck duck_runtime.tools regs` 看舵机上电后是多少（只读，站着也能跑）。
+- kissqy 实际跑的走路模型是他按 HD1910 自己训练的 velstand（`Mjlab-VelStand-Rough-Backlash-MicroDuck`，
+  P=5、820 g、2° 齿隙，sha256 `1cbf8730…`），观测/动作约定和 HOME 跟官方逐位一致，可以直接放进 walk 槽：
+
+```bash
+cd ~/microduck_rl/policies
+curl -fL -o kissqy_walk.onnx https://github.com/kissqy/Microduck-kissqy/raw/main/microduck-hd1910/firmware/policies/walk/policy.onnx
+cd ~/microduck_rl
+duck duck_runtime.dashboard --calib calib.json --set policies --policy policies/kissqy_walk.onnx --action-scale 1.0 --on-fall getup
+```
+
+  他的部署参数是动作幅度 1.0、头/腿低通 0.5/0.7（`deployment-execution.json`），后者就是我们的默认值。
+  仿真 835 g 对比（3 个种子）：零指令都站得住；vx=0.2 时 8 s 走 0.97 m（官方 0.9 幅度 0.58 m）。
+  坐站、捡、踢、滚仍用官方网络。他的模型只限个人非商业使用（见他仓库的 LICENSE）。
+
 ## 先在电脑上预演
 
 在电脑上（不是鸭子上）：`git clone -b ours-813g-hd1910 https://github.com/sisjkly/microduck_rl.git && cd microduck_rl && uv sync`

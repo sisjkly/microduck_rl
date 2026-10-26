@@ -218,6 +218,48 @@ def cmd_relax(args):
         b.close()
 
 
+def servo_register_rows(b, ids) -> list[str]:
+    """One native read of HD1910 registers 21..52 per servo (read-only, works with torque on).
+    21-23 EEPROM P/D/I, 26/27 dead zone, 41 acceleration, 46-47 goal speed, 48-49 torque
+    limit, 50-52 RAM P/D/I (what the servo runs with). kissqy control.43 fixed his body jitter
+    by writing RAM D=0 and torque limit 1000 (duck-control/src/hd1910.rs write_fixed_settings)."""
+    rows = []
+    for i in ids:
+        try:
+            r = b.native(i, 21, 32)
+        except Exception as e:          # noqa: BLE001 - one slow servo should not hide the rest
+            rows.append(f"  ID {i:2d}: read failed ({e})")
+            continue
+        at = lambda a: r[a - 21]
+        u16 = lambda a: struct.unpack_from("<H", r, a - 21)[0]
+        flag = []
+        if at(51) != 0:
+            flag.append("RAM D!=0")
+        if u16(48) < 1000:
+            flag.append("torque limit<1000")
+        rows.append(f"  ID {i:2d}: RAM P/D/I {at(50):3d}/{at(51):3d}/{at(52):3d}  EEPROM P/D/I {at(21):3d}/{at(22):3d}/{at(23):3d}"
+                    f"  dead zone {at(26)}/{at(27)}  acc {at(41):3d}  goal speed {u16(46):4d}  torque limit {u16(48):4d}"
+                    + (f"   <- {', '.join(flag)}" if flag else ""))
+    return rows
+
+
+def cmd_regs(args):
+    """Read-only register dump of every served servo (safe while the robot stands)."""
+    if args.backend != "bridge":
+        raise SystemExit("regs is for the bridge backend")
+    from .bridge import Bridge
+    b = Bridge(_port(args))
+    try:
+        ids = b.served_ids()
+        print(f"served IDs {list(ids)}")
+        for line in servo_register_rows(b, ids):
+            print(line)
+        print("RAM D/torque limit: duck_runtime writes P=5 D=0 at every torque-on (NPD1); "
+              "the torque limit is left as the servo powered up with.")
+    finally:
+        b.close()
+
+
 # step-test reference numbers come from SimIO (BAM HD1910, P=5 D=0, no extra delay), robot
 # standing at HOME, +150 counts on one joint.
 def cmd_step_test(args):
@@ -854,14 +896,14 @@ def main(argv=None):
     p.add_argument("out")
     p.add_argument("--layout", choices=["bridge", "official"], default="bridge")
     p.set_defaults(fn=cmd_template)
-    for name, fn in [("scan", cmd_scan), ("relax", cmd_relax), ("step-test", cmd_step_test),
+    for name, fn in [("scan", cmd_scan), ("relax", cmd_relax), ("regs", cmd_regs), ("step-test", cmd_step_test),
                      ("live", cmd_live), ("zero", cmd_zero),
                      ("direction", cmd_direction), ("imu-mount", cmd_imu_mount), ("home-test", cmd_home_test),
                      ("trim", cmd_trim), ("hip-roll", cmd_hip_roll), ("imu-snap", cmd_imu_snap),
                      ("pose-check", cmd_pose_check), ("sign-test", cmd_sign_test), ("mouth", cmd_mouth)]:
         p = sub.add_parser(name)
         add_robot_args(p)
-        if name not in ("scan", "relax", "step-test"):
+        if name not in ("scan", "relax", "regs", "step-test"):
             p.add_argument("--calib", required=True)
         if name == "step-test":
             p.add_argument("--id", type=int, default=13, help="bridge ID (13 = head_yaw)")
