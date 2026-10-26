@@ -287,3 +287,68 @@ def test_ground_pick_scripts_the_beak_then_hands_it_back(tmp_path):
     assert np.all(np.diff(mouth[:k(0.30)]) >= -1e-9)
     drive(r, 2)
     assert np.degrees(io.written[-1][MOUTH_INDEX]) == pytest.approx(10.0)   # back to the user's
+
+
+# -- kissqy's HD1910 set: per-network low-pass and the set's own gait settings -----------------
+
+def kissqy_set(tmp_path):
+    from duck_runtime.fetch_set import kissqy_manifest
+    return make_set(tmp_path, manifest=kissqy_manifest())
+
+
+def test_kissqy_manifest_loads_with_its_deployment_settings(tmp_path):
+    from duck_runtime.policy_set import apply_walk_tuning
+    loader, nets = kissqy_set(tmp_path)
+    s = load_set(str(tmp_path), loader=loader)
+    assert s.walk is nets["kissqy_velstand"] and (s.walk_action_scale, s.walk_lowpass) == (1.0, (0.5, 0.7))
+    assert s.sitstand.policy is nets["kissqy_sitstand"] and s.sitstand.lowpass is None   # stock sit/stand path
+    assert list(s.skills) == ["ground_pick", "roulade", "kick_left", "kick_right"]
+    assert all(sk.lowpass == (1.0, 1.0) and sk.action_scale == 1.0 for sk in s.skills.values())
+    assert s.skills["ground_pick"].encoding == "phase"
+    assert bind_keys(s.skills) == {"g": "ground_pick", "r": "roulade", "k": "kick_left", "l": "kick_right"}
+    t = apply_walk_tuning(s, Tuning.official())
+    assert (t.action_scale, t.head_lowpass, t.legs_lowpass) == (1.0, 0.5, 0.7)
+    assert apply_walk_tuning(s, Tuning.official(), 0.8).action_scale == 0.8          # --action-scale wins
+    # --policy replaces the walk: the manifest's walk settings no longer apply
+    s2 = load_set(str(tmp_path), walk="kissqy_roulade.onnx", loader=loader)
+    assert s2.walk_action_scale is None and s2.walk_lowpass is None
+
+
+def test_official_manifest_keeps_the_global_tuning(tmp_path):
+    from duck_runtime.policy_set import apply_walk_tuning
+    loader, _ = make_set(tmp_path)
+    s = load_set(str(tmp_path), loader=loader)
+    assert s.walk_action_scale is None and all(sk.lowpass is None for sk in s.skills.values())
+    t = apply_walk_tuning(s, Tuning.official())
+    assert (t.action_scale, t.head_lowpass, t.legs_lowpass) == (0.9, 0.5, 0.7)
+
+
+def test_unfiltered_skill_bypasses_the_global_lowpass(tmp_path):
+    loader, nets = kissqy_set(tmp_path)
+    from duck_runtime.policy_set import apply_walk_tuning
+    s = load_set(str(tmp_path), loader=loader)
+    io = UprightIO()
+    r = Runner(io, Controller(s.walk, apply_walk_tuning(s, Tuning.official())), ramp_s=0.02, policies=s)
+    r.enable(); r.tick(); r.tick()
+    assert r.start()
+    drive(r, 5)
+    leg = POLICY_JOINTS[3]
+    walk_target = io.written[-1][leg]
+    assert r.trigger("kick_left") is None
+    drive(r, 1)
+    a = nets["kissqy_kick_left"].value
+    assert io.written[-1][leg] == pytest.approx(DEFAULT_POSITION[leg] + a)          # no 0.7 blend
+    assert io.written[-1][leg] != pytest.approx(0.7 * (DEFAULT_POSITION[leg] + a) + 0.3 * walk_target)
+    drive(r, 25)                                                                    # back to the gait
+    assert r.mode == "walk"
+    w = nets["kissqy_velstand"].value
+    prev = io.written[-2][leg]
+    assert io.written[-1][leg] == pytest.approx(0.7 * (DEFAULT_POSITION[leg] + 1.0 * w) + 0.3 * prev)
+
+
+def test_lowpass_out_of_range_is_refused(tmp_path):
+    m = json.loads(json.dumps(OFFICIAL_MANIFEST))
+    m["policies"][-1]["lowpass"] = {"head": 1.0, "legs": 0.0}
+    loader, _ = make_set(tmp_path, manifest=m)
+    with pytest.raises(ValueError, match="lowpass"):
+        load_set(str(tmp_path), loader=loader)

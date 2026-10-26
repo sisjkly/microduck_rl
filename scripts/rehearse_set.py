@@ -35,7 +35,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from duck_runtime.controller import Command, Controller, Tuning  # noqa: E402
-from duck_runtime.policy_set import load_set  # noqa: E402
+from duck_runtime.policy_set import apply_walk_tuning, load_set  # noqa: E402
 from duck_runtime.runner import Runner, State  # noqa: E402
 from duck_runtime.sim_io import SimIO  # noqa: E402
 
@@ -73,9 +73,7 @@ def episode(pset, args, scenario: str, seed: int) -> dict:
 
 
 def _episode(io, viewer, pset, args, scenario: str, seed: int) -> dict:
-    tuning = Tuning.official()
-    if args.action_scale is not None:
-        tuning.action_scale = args.action_scale
+    tuning = apply_walk_tuning(pset, Tuning.official(), args.action_scale)   # as duck_runtime.run
     r = Runner(io, Controller(pset.walk, tuning), policies=pset, log=[], on_fall=args.on_fall)
     rng = np.random.default_rng(seed)
     cmd = tuple(float(v) for v in args.cmd.split(","))

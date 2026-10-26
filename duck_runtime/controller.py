@@ -106,9 +106,12 @@ class Controller:
         )
 
     def step(self, sensors: Sensors, command: Command, policy: Policy | None = None,
-             action_scale: float | None = None) -> np.ndarray:
+             action_scale: float | None = None,
+             lowpass: tuple[float | None, float | None] | None = None) -> np.ndarray:
         """``policy`` / ``action_scale`` select another network of the set for this tick
-        (control.rs: last_action and the low-pass are shared across every network)."""
+        (control.rs: last_action and the low-pass are shared across every network).
+        ``lowpass`` = (head, legs) alphas for this tick instead of the tuning's (1.0 = straight
+        through), for networks deployed unfiltered (kissqy's HD1910 skills)."""
         obs = self.observe(sensors, command)
         self.last_obs = obs
         action = (policy or self.policy)(obs)
@@ -118,12 +121,13 @@ class Controller:
         targets = DEFAULT_POSITION + scale * scatter_action(action)
         targets[MOUTH_INDEX] = MOUTH_CLOSED
         prev = self.previous_targets
+        head_a, legs_a = (self.tuning.head_lowpass, self.tuning.legs_lowpass) if lowpass is None else lowpass
         if prev is not None:
-            a = self.tuning.head_lowpass
+            a = head_a
             if a is not None:
                 for j in HEAD_JOINTS:
                     targets[j] = a * targets[j] + (1.0 - a) * prev[j]
-            a = self.tuning.legs_lowpass
+            a = legs_a
             if a is not None:
                 for j in range(NUM_JOINTS):
                     if j in HEAD_JOINTS or j == MOUTH_INDEX:

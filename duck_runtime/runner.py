@@ -385,7 +385,7 @@ class Runner:
             self.sit = "up"
 
         cmd = self.safety.gate_command(self.command, s.t - self._command_t)
-        policy = scale = None
+        policy = scale = lowpass = None
         if self.move is not None:
             # Head and body zeroed: every one-shot declares them unused (zero_command_padding).
             sk = self.move.skill
@@ -396,16 +396,17 @@ class Runner:
                     self._mouth_override = pick_mouth(self.move.elapsed / sk.period_s)
             else:
                 twist = sk.unwind if self.move.unwinding else sk.twist
-            cmd, policy, scale = Command(twist=twist), sk.policy, sk.action_scale
+            cmd, policy, scale, lowpass = Command(twist=twist), sk.policy, sk.action_scale, sk.lowpass
             self.mode = sk.name + (":unwind" if self.move.unwinding else "")
         elif self.sit in ("sitting", "rising"):
             ss = self.policies.sitstand
             # The posture flag rides twist vx: 1 sit, 0 stand; head stays live.
             cmd = replace(cmd, twist=(1.0, 0.0, 0.0) if self.sit == "sitting" else (0.0, 0.0, 0.0))
-            policy, scale, self.mode = ss.policy, ss.action_scale, "sit" if self.sit == "sitting" else "rise"
+            policy, scale, lowpass = ss.policy, ss.action_scale, ss.lowpass
+            self.mode = "sit" if self.sit == "sitting" else "rise"
         else:
             self.mode = "walk"
-        targets = self.controller.step(s, cmd, policy, scale)
+        targets = self.controller.step(s, cmd, policy, scale, lowpass)
 
         # Advance the windows after the tick that used them.
         if self.move is not None:

@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from mjviser.scene import ViserMujocoScene  # noqa: E402
 
 from duck_runtime.controller import Command, Controller, Policy, Tuning  # noqa: E402
-from duck_runtime.policy_set import load_set  # noqa: E402
+from duck_runtime.policy_set import apply_walk_tuning, load_set  # noqa: E402
 from duck_runtime.runner import Runner, State  # noqa: E402
 from duck_runtime.sim_io import SimIO  # noqa: E402
 
@@ -68,7 +68,9 @@ class DuckApp:
         else:
             raise SystemExit("--set or --policy is required")
         self.tuning = Tuning.official()
-        if args.action_scale is not None:
+        if self.pset is not None:
+            apply_walk_tuning(self.pset, self.tuning, args.action_scale)   # as duck_runtime.run
+        elif args.action_scale is not None:
             self.tuning.action_scale = args.action_scale
 
         self.io = SimIO(mass_profile=None if args.profile == "official" else args.profile, servo="hd1910",

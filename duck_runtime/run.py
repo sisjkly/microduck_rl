@@ -119,13 +119,15 @@ def build_runner(args, ap: argparse.ArgumentParser):
         ap.error("--head-cmd needs 4 values")
     pset, skill_keys = None, {}
     if args.policy_set:
-        from .policy_set import bind_keys, load_set
+        from .policy_set import apply_walk_tuning, bind_keys, load_set
         pset = load_set(args.policy_set, walk=args.policy, sitstand=args.sitstand)
         skill_keys = bind_keys(pset.skills)
         if args.rise_s is not None and pset.sitstand is not None:
             pset.sitstand.rise_s = args.rise_s
         walk = pset.walk
-        print(f"policy set {args.policy_set}: walk {pset.walk_file}, sit/stand "
+        if args.tuning == "official":       # the set's own gait settings (kissqy: 1.0, 0.5 / 0.7)
+            apply_walk_tuning(pset, tuning, args.action_scale)
+        print(f"policy set {args.policy_set}: walk {pset.walk_file} (scale {tuning.action_scale:g}), sit/stand "
               f"{'x' if pset.sitstand else '-'}, skills "
               + (", ".join(f"{k}={n} ({pset.skills[n].duration_s:.1f} s)" for k, n in skill_keys.items()) or "-"))
     elif args.policy:
