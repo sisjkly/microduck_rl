@@ -202,3 +202,23 @@ def test_two_sets_switch_only_with_the_policy_stopped(dash):
     assert wait_for(lambda: len(dash.nets2["kissqy_kick_right"].seen) > 0)
     assert len(dash.nets["ball_kick_right"].seen) == 0
     assert call(dash, "POST", "/api/action", {"action": "set", "name": "nope"})[1]["ok"] is False
+
+
+def test_client_resets_are_not_printed(capsys):
+    import sys
+    from duck_runtime.dashboard import DashboardServer
+    srv = DashboardServer(("127.0.0.1", 0), make_handler(None))
+    try:
+        for exc in (ConnectionResetError(104, "Connection reset by peer"), BrokenPipeError()):
+            try:
+                raise exc
+            except OSError:
+                srv.handle_error(None, ("10.42.0.147", 62846))
+        assert capsys.readouterr().err == ""
+        try:
+            raise ValueError("a real bug")
+        except ValueError:
+            srv.handle_error(None, ("10.42.0.147", 62846))
+        assert "a real bug" in capsys.readouterr().err
+    finally:
+        srv.server_close()

@@ -505,6 +505,17 @@ def make_handler(dash: Dashboard):
     return Handler
 
 
+class DashboardServer(ThreadingHTTPServer):
+    """A browser that goes away (tab closed, Wi-Fi drop, laptop asleep) resets its connection;
+    socketserver would print a full traceback for each. Those are routine: keep quiet."""
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def _urls(port: int, token: str | None) -> list[str]:
     q = f"/?token={token}" if token else "/"
     hosts = [f"{socket.gethostname()}.local"]
@@ -535,8 +546,7 @@ def main(argv=None):
                      token=token, realtime=args.backend == "sim", calib_path=args.calib)
     if args.backend == "sim":
         runner.enable()                       # nobody is holding a simulated duck
-    server = ThreadingHTTPServer((args.host, args.http_port), make_handler(dash))
-    server.daemon_threads = True
+    server = DashboardServer((args.host, args.http_port), make_handler(dash))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print("dashboard:", "  ".join(_urls(args.http_port, token)))
     print("Ctrl+C here: torque off and exit")
