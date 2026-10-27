@@ -385,3 +385,30 @@ def test_load_sets_two_dirs_first_active_policy_override_on_the_first_only(tmp_p
                           "--action-scale", "0.8"])
     bank = load_sets(args, ap, Tuning.official())
     assert [s.tuning.action_scale for s in bank.sets] == [0.8, 0.8]   # an explicit override wins everywhere
+
+
+def test_skill_duration_override(tmp_path, monkeypatch):
+    import argparse
+    import duck_runtime.policy_set as ps
+    from duck_runtime.run import add_runner_args, load_sets
+    loader, nets = make_set(tmp_path)
+    real_load_set = ps.load_set
+    monkeypatch.setattr(ps, "load_set", lambda d, **kw: real_load_set(d, loader=loader, **kw))
+    ap = argparse.ArgumentParser()
+    add_runner_args(ap)
+    ap.error = lambda msg: (_ for _ in ()).throw(SystemExit(msg))
+    bank = load_sets(ap.parse_args(["--set", str(tmp_path), "--skill-duration", "roulade=3"]), ap, Tuning.official())
+    sk = bank.active.pset.skills
+    assert sk["roulade"].duration_s == 3.0 and sk["kick_left"].duration_s == 0.5
+    for bad in ("roulade", "roulade=abc", "roulade=0", "roulade=60", "flip=3"):
+        with pytest.raises(SystemExit):
+            load_sets(ap.parse_args(["--set", str(tmp_path), "--skill-duration", bad]), ap, Tuning.official())
+    # the runner drives the roulade network for the whole 3 s window, then the gait
+    r = Runner(UprightIO(), Controller(bank.active.pset.walk, Tuning.official()), ramp_s=0.02,
+               policies=bank.active.pset)
+    r.enable(); r.tick(); r.tick()
+    assert r.start() and r.trigger("roulade") is None
+    drive(r, 150, twist=(0.0, 0.0, 0.0))
+    assert len(sk["roulade"].policy.seen) == 150 and r.mode == "roulade"
+    drive(r, 1, twist=(0.0, 0.0, 0.0))
+    assert r.mode == "walk"

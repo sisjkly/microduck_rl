@@ -75,6 +75,9 @@ def add_runner_args(ap: argparse.ArgumentParser) -> None:
                          "key p in the terminal, the selector on the dashboard; the first one starts active")
     ap.add_argument("--rise-s", type=float, default=None,
                     help="with --set: seconds the sit/stand network drives the rise (manifest: 1.0)")
+    ap.add_argument("--skill-duration", action="append", default=[], metavar="NAME=SECONDS",
+                    help="with --set: how long a move's network drives before the gait takes over, e.g. "
+                         "roulade=3 (manifest: roulade 1.0, kicks 0.5, ground pick 2.8); repeatable, every set")
     ap.add_argument("--sitstand", help="with --set: another sit/stand network (twist vx = sit flag), "
                     "e.g. the got-a-talent reference")
     ap.add_argument("--tuning", choices=["official", "trained"], default="official",
@@ -113,7 +116,7 @@ class LoadedSet:
         p = self.pset
         return (f"{self.label}: walk {p.walk_file} (scale {self.tuning.action_scale:g}, low-pass "
                 f"{self.tuning.head_lowpass}/{self.tuning.legs_lowpass}), sit/stand {'x' if p.sitstand else '-'}, "
-                f"skills " + (", ".join(f"{k}={n}" for k, n in self.keys.items()) or "-"))
+                f"skills " + (", ".join(f"{k}={n} ({p.skills[n].duration_s:g} s)" for k, n in self.keys.items()) or "-"))
 
 
 class SetBank:
@@ -148,14 +151,34 @@ def _set_label(path: str, pset) -> str:
     return f"{base} ({pset.servos})" if getattr(pset, "servos", "") else base
 
 
+def parse_skill_durations(items: list[str], ap: argparse.ArgumentParser) -> dict[str, float]:
+    """["roulade=3", ...] -> {"roulade": 3.0}. The window of a phase-encoded move (ground pick)
+    is period * end_phase in training: lengthening it runs the phase past its trained end."""
+    out = {}
+    for item in items:
+        name, _, sec = item.partition("=")
+        try:
+            v = float(sec)
+        except ValueError:
+            v = float("nan")
+        if not name or not (0.1 <= v <= 10.0):
+            ap.error(f"--skill-duration {item!r}: want NAME=SECONDS with 0.1..10 s, e.g. roulade=3")
+        out[name.strip()] = v
+    return out
+
+
 def load_sets(args, ap: argparse.ArgumentParser, base_tuning: Tuning) -> SetBank:
     from .policy_set import apply_walk_tuning, bind_keys, load_set
     paths = args.policy_set or []
+    durations = parse_skill_durations(getattr(args, "skill_duration", None) or [], ap)
     sets: list[LoadedSet] = []
     for i, path in enumerate(paths):
         pset = load_set(path, walk=args.policy if i == 0 else None, sitstand=args.sitstand if i == 0 else None)
         if args.rise_s is not None and pset.sitstand is not None:
             pset.sitstand.rise_s = args.rise_s
+        for name, sec in durations.items():
+            if name in pset.skills:
+                pset.skills[name].duration_s = sec
         tuning = replace(base_tuning)
         if args.tuning == "official":       # the set's own gait settings (kissqy: 1.0, 0.5 / 0.7)
             apply_walk_tuning(pset, tuning, args.action_scale)
@@ -163,6 +186,9 @@ def load_sets(args, ap: argparse.ArgumentParser, base_tuning: Tuning) -> SetBank
         if any(s.label == label for s in sets):
             label = f"{label} #{i + 1}"
         sets.append(LoadedSet(label, path, pset, bind_keys(pset.skills), tuning))
+    unknown = [n for n in durations if not any(n in ls.pset.skills for ls in sets)]
+    if unknown:
+        ap.error(f"--skill-duration: no move named {unknown} in the loaded sets")
     return SetBank(sets)
 
 

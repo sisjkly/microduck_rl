@@ -156,6 +156,8 @@ def main(argv=None):
     ap.add_argument("--on-fall", choices=["limp", "keep", "getup"], default="limp",
                     help="limp = this robot's runtime default; keep = robotd's")
     ap.add_argument("--action-scale", type=float, default=None)
+    ap.add_argument("--skill-duration", action="append", default=[], metavar="NAME=SECONDS",
+                    help="as duck_runtime.run, e.g. roulade=3")
     ap.add_argument("--cmd", default="0,0,0", help="walk command vx,vy,wz held throughout (use = for negatives)")
     ap.add_argument("--push", type=float, default=0.0, help="trunk velocity kick, m/s along x (+ shoves it back)")
     ap.add_argument("--push-at", type=float, default=0.8, help="seconds after the move starts")
@@ -166,6 +168,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     pset = load_set(args.policy_set, walk=args.policy, sitstand=args.sitstand)
+    from duck_runtime.run import parse_skill_durations
+    for name, sec in parse_skill_durations(args.skill_duration, ap).items():
+        pset.skills[name].duration_s = sec
     scenarios = (["sitstand"] if pset.sitstand else []) + list(pset.skills) \
         if args.scenario == "all" else args.scenario.split(",")
     print(f"set {args.policy_set}: walk {pset.walk_file}; profile {args.profile}, HD1910; "
