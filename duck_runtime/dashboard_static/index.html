@@ -369,7 +369,7 @@ function buildLadder() {
 async function loadInfo() {
   info = await (await fetch("/api/info")).json();
   $("host").textContent = `${info.host} · ${info.backend === "sim" ? "仿真" : "真机"} · 步态 ${info.policy.walk} · ${info.control_hz} Hz` +
-    (info.calib ? ` · ${info.calib}` : "");
+    (info.calib ? ` · ${info.calib}` : "") + (info.version ? ` · 代码 ${info.version}` : "");
   $("onFall").value = info.on_fall; $("getup").value = info.getup_timeout_s || 0;
   if (info.token_required && !token) banner("没有控制权限：请用机器人终端上打印的带 token 的地址打开本页。");
   buildSets(); buildMoves(); buildJoints(); buildLadder();

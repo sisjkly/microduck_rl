@@ -162,7 +162,9 @@ def test_record_save_list_download(dash):
     assert st == 200 and data[:2] == b"PK"                     # an npz is a zip
     import io
     z = np.load(io.BytesIO(data), allow_pickle=True)
-    assert {"t", "state", "mode", "positions", "voltages", "currents"} <= set(z.files) and len(z["t"]) > 5
+    assert {"t", "state", "mode", "positions", "voltages", "currents", "on_fall", "meta"} <= set(z.files) and len(z["t"]) > 5
+    meta = json.loads(str(z["meta"]))
+    assert meta["set"] == "set (xl330)" and "version" in meta and set(z["on_fall"]) == {"limp"}
 
 
 def test_page_is_served(dash):

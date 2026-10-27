@@ -48,6 +48,20 @@ MOUTH_RANGE_DEG = (-5.0, 30.0)     # MJCF mouth travel; -5 = closed
 LOG_NAME = re.compile(r"^[A-Za-z0-9_.-]+\.npz$")
 
 
+def code_version() -> str:
+    """Short git commit of this checkout (+ "-dirty"), so a log/screenshot says which code ran."""
+    import subprocess
+    here = Path(__file__).resolve().parent
+    try:
+        rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=here, capture_output=True,
+                             text=True, timeout=2).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=here,
+                               capture_output=True, text=True, timeout=2).stdout.strip()
+        return (rev + ("-dirty" if dirty else "")) if rev else "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
 def _num(x, nd=2):
     if x is None:
         return None
@@ -94,6 +108,7 @@ class Dashboard:
         self.clients = 0
         self._prev = {}
         self.started = time.time()
+        self.version = code_version()
 
     @property
     def pset(self):
@@ -236,11 +251,17 @@ class Dashboard:
                 log, self.recording, self.runner.log = self.recording, None, None
                 name = time.strftime("dash_%Y%m%d-%H%M%S.npz")
                 if log:
-                    save_log(str(self.log_dir / name), log)
+                    save_log(str(self.log_dir / name), log, self.log_meta())
                     self.log_event("info", f"recording saved: {name} ({len(log)} ticks)")
                 return {"ok": True, "file": name if log else None}
             return {"ok": True}
         return self.submit(apply)
+
+    def log_meta(self) -> dict:
+        a = self.bank.active
+        return {"version": self.version, "backend": self.backend, "set": a.label if a else None,
+                "walk": a.pset.walk_file if a else None, "on_fall_at_save": self.runner.on_fall,
+                "getup_timeout_s": self.runner.getup_timeout_s, "calib": self.calib_path}
 
     def list_logs(self) -> list[dict]:
         out = []
@@ -268,6 +289,7 @@ class Dashboard:
             joints.append(row)
         return {
             "host": socket.gethostname(), "backend": self.backend, "started": self.started,
+            "version": self.version,
             "calib": self.calib_path, "joints": joints, "limits": LIMITS,
             "policy": {"walk": getattr(self.pset, "walk_file", None) if self.pset else "single policy",
                        "sitstand": bool(self.pset and self.pset.sitstand), "skills": skills},
@@ -371,7 +393,7 @@ class Dashboard:
         r, io = self.runner, self.io
         dt = io.control_dt
         next_frame = 0.0
-        self.log_event("info", f"dashboard up ({self.backend})")
+        self.log_event("info", f"dashboard up ({self.backend}, code {self.version}, on fall: {r.on_fall})")
         while not self.stop_event.is_set():
             t0 = time.monotonic()
             while True:
@@ -548,6 +570,7 @@ def main(argv=None):
         runner.enable()                       # nobody is holding a simulated duck
     server = DashboardServer((args.host, args.http_port), make_handler(dash))
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"code {dash.version}, on fall: {runner.on_fall}")
     print("dashboard:", "  ".join(_urls(args.http_port, token)))
     print("Ctrl+C here: torque off and exit")
     try:
@@ -559,7 +582,7 @@ def main(argv=None):
         if dash.recording:
             from .run import save_log
             name = time.strftime("dash_%Y%m%d-%H%M%S.npz")
-            save_log(str(dash.log_dir / name), dash.recording)
+            save_log(str(dash.log_dir / name), dash.recording, dash.log_meta())
             print(f"\nrecording -> {dash.log_dir / name}")
         runner.limp()
         io.close()
