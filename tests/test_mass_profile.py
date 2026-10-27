@@ -98,5 +98,13 @@ def test_ours_835g_total_and_head(xml):
     assert np.all(I > 0) and np.all(I[:, 0] + I[:, 1] >= I[:, 2] * (1 - 1e-9))
 
 
-def test_default_profile_is_the_robot_with_mouth():
-    assert mp.DEFAULT_PROFILE == "ours_835g"
+def test_default_profile_is_the_robot_with_the_new_head():
+    assert mp.DEFAULT_PROFILE == "ours_818g"
+
+
+@pytest.mark.parametrize("xml", VARIANTS)
+def test_ours_818g_total_and_head(xml):
+    m = _model(xml, "ours_818g")
+    assert m.body_mass.sum() * 1000 == pytest.approx(818.5, abs=1.0)
+    if xml == "robot_walk.xml":
+        assert m.body_subtreemass[m.body("neck_pitch").id] * 1000 == pytest.approx(265.5, abs=3.0)
