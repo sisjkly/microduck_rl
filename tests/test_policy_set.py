@@ -249,11 +249,12 @@ def test_getup_limp_fall_sequence(tmp_path):
     drive(r, 8)
     assert r.fall_seq is None and r.mode == "walk" and r.state is State.RUN
     assert len(nets["velstand"].seen) > n_walk
-    # Lying still after the hand-back: re-posed after 1 s, at most 3 times, then still down
-    # 5 s after the last hand-back -> give up and limp.
+    # Lying still after the hand-back: re-posed (limp, settle, pose) after 1 s, at most 3 times,
+    # then still down 5 s after the last hand-back -> give up and limp.
     drive(r, 51)
-    assert r.fall_seq and r.fall_seq["phase"] == "pose" and r.reposes == 1
-    drive(r, 2 * (51 + 30) + 30 + 260)
+    assert r.fall_seq and r.fall_seq["phase"] == "limp" and r.reposes == 1 and io.torque_calls[-1] is False
+    cycle = 25 + 30 + 51                      # limp >= 0.5 s, pose 0.6 s, still 1 s
+    drive(r, 2 * cycle + 25 + 30 + 260)
     assert r.reposes == 3
     assert r.state is State.LIMP and r.fall_events == 1 and "still down" in r.refusal
 
@@ -266,26 +267,38 @@ def test_getup_reposes_a_robot_lying_still_after_a_start_on_the_floor_or_a_move(
     drive(r, 10)
     assert r.fall_seq is None and r.mode == "walk"       # not yet: 0.2 s debounce + 1 s still
     drive(r, 51)
-    assert r.fall_seq and r.fall_seq["phase"] == "pose" and r.mode == "fall:pose" and r.reposes == 1
-    assert io.torque_calls == [True]                     # torque stays on: no limp phase
-    target_end = r.stand_pose
+    assert r.fall_seq and r.fall_seq["phase"] == "limp" and r.mode == "fall:limp" and r.reposes == 1
+    assert io.torque_calls == [True, False]              # the legs go soft first
+    drive(r, 24)
+    assert r.fall_seq["phase"] == "limp"                 # at least 0.5 s limp, even when still
+    drive(r, 2)
+    assert r.fall_seq["phase"] == "pose" and io.torque_calls == [True, False, True]
     drive(r, 30)
     assert r.fall_seq is None and r.mode == "walk"
-    # moving (thrashing to get up) is not stuck
+    # moving is not "still", but 2.5 s down with no progress is stuck too
     io.gyro = np.array([0.0, 1.5, 0.0])
     drive(r, 100)
     assert r.reposes == 1
+    drive(r, 30)
+    assert r.reposes == 2 and r.fall_seq and r.fall_seq["phase"] == "limp"
+    drive(r, 26 + 30)
+    assert r.fall_seq is not None                         # still moving: limp waits (max 1.5 s)
+    io.gyro = np.zeros(3)
+    drive(r, 75)
+    assert r.fall_seq is None and r.mode == "walk"
     io.gyro = np.zeros(3)
     io.gravity = np.array([0.0, 0.0, -1.0])               # up: the count starts over
     drive(r, 15)
     assert r.reposes == 0 and r.state is State.RUN
+    # half up (50 deg) is no longer "fallen" but not upright either: the count is kept
+    assert r.reposes == 0
     # a fall inside a move: nothing while the move runs, re-posed once it ends and it lies still
     assert r.trigger("kick_left") is None
     io.gravity = np.array([1.0, 0.0, 0.0])
     drive(r, 24)
     assert r.fall_seq is None and r.mode == "kick_left"
     drive(r, 2 + 51)
-    assert r.fall_seq and r.fall_seq["phase"] == "pose"
+    assert r.fall_seq and r.fall_seq["phase"] == "limp"
 
 
 def test_keep_mode_never_reposes(tmp_path):

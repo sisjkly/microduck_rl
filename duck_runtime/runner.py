@@ -118,8 +118,15 @@ class Runner:
     # exact state reproduces it (any target clamp) and one re-pose stands it up (0.5-2.9 s,
     # both sets, ideal and full-pack supply). Covers what limp-fall cannot: starting the policy
     # on the floor, and a fall inside a move (no limp-fall during moves, as robotd).
+    # dash_20261027-083331.npz (new head): a re-pose with torque on left it propped on its
+    # right side by its own stiff legs, 3 times; the one get-up that day went through the
+    # limp phase (legs folded, it rolled onto its front). So a re-pose is the whole robotd
+    # limp-fall sequence: torque off, at least repose_limp_min_s for the legs to fold and the
+    # body to settle, torque on, pose, gait. Stuck = lying still, or no progress at all.
     stuck_rate: float = 0.3               # rad/s: |gyro| below this counts as lying still
     stuck_repose_s: float = 1.0           # still this long while down -> re-pose
+    stuck_noprogress_s: float = 2.5       # or down this long since the gait took over
+    repose_limp_min_s: float = 0.5
     max_reposes: int = 3                  # then the get-up timeout decides (limp)
 
     def __post_init__(self):
@@ -136,6 +143,7 @@ class Runner:
         self.falls_seen = 0           # every fall verdict while running (keep mode gets up)
         self._was_fallen = False
         self._still_down = 0.0
+        self._down_driving = 0.0      # down with the gait driving since the last hand-back
         self.reposes = 0              # re-poses since the robot was last upright
         self._run_t0 = 0.0
         self.refusal = ""
@@ -318,20 +326,27 @@ class Runner:
                     self.mode = "fall:limp"
             else:
                 self.predictor.reset()
+        if s.imu_ready and s.imu.gravity[2] < -0.9:          # upright (< ~25 deg): start over
+            self.reposes = 0
         if not fallen:
-            self._still_down, self.reposes = 0.0, 0
+            self._still_down = self._down_driving = 0.0
         elif (self.state is State.RUN and self.on_fall == "getup" and self.fall_seq is None
                 and not (self.busy or self.sit == "sitting") and s.imu_ready):
-            # Lying still is stuck, not getting up: re-pose (torque is on: no limp phase).
+            # Lying still, or getting nowhere: not getting up. Re-pose through the limp phase.
+            dt = self.io.control_dt
+            self._down_driving += dt
             if float(np.linalg.norm(s.imu.gyro)) < self.stuck_rate:
-                self._still_down += self.io.control_dt
+                self._still_down += dt
             else:
                 self._still_down = 0.0
-            if self._still_down >= self.stuck_repose_s - 1e-9 and self.reposes < self.max_reposes:
+            stuck = (self._still_down >= self.stuck_repose_s - 1e-9
+                     or self._down_driving >= self.stuck_noprogress_s - 1e-9)
+            if stuck and self.reposes < self.max_reposes:
                 self.reposes += 1
-                self._still_down = 0.0
-                self.fall_seq = {"phase": "pose", "since": s.t, "from": s.positions.copy()}
-                self.mode = "fall:pose"
+                self._still_down = self._down_driving = 0.0
+                self.io.set_torque(False)
+                self.fall_seq = {"phase": "limp", "since": s.t, "still": 0.0, "min": self.repose_limp_min_s}
+                self.mode = "fall:limp"
         if (self.state is State.RUN and fallen and not (self.busy or self.sit == "sitting")
                 and s.t >= self._grace_until and self.fall_seq is None):
             if self.on_fall == "limp":
@@ -387,7 +402,8 @@ class Runner:
         if fs["phase"] == "limp":
             rate = float(np.linalg.norm(s.imu.gyro))
             fs["still"] = fs["still"] + dt if rate < self.limp_fall_still_rate else 0.0
-            if fs["still"] >= self.limp_fall_still_s - 1e-9 or s.t - fs["since"] >= self.limp_fall_max_s:
+            settled = fs["still"] >= self.limp_fall_still_s - 1e-9 and s.t - fs["since"] >= fs.get("min", 0.0) - 1e-9
+            if settled or s.t - fs["since"] >= self.limp_fall_max_s:
                 try:
                     self.io.set_torque(True)        # goal = where each joint lies: no jump
                 except RuntimeError as e:
@@ -405,6 +421,7 @@ class Runner:
             self.predictor.reset()
             self.controller.reset()
             self._run_t0 = s.t                      # get-up timeout counts from here
+            self._down_driving = self._still_down = 0.0
             return self._policy_step(s)
         targets = fs["from"] + (self.stand_pose - fs["from"]) * a
         targets[MOUTH_INDEX] = MOUTH_CLOSED
