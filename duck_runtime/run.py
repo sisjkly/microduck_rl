@@ -8,8 +8,9 @@
 
   # the official set (sit/stand, ground pick, kicks, roulade): the Hub repo in policies/
   python -m duck_runtime.run --calib calib.json --set policies
-  # two sets, switch with p: kissqy's HD1910-trained one (duck_runtime.fetch_set kissqy) first
-  python -m duck_runtime.run --calib calib.json --set policies_hd1910 --set policies
+  # two complete sets, switch with p (official first = active at start; kissqy's set from
+  # duck_runtime.fetch_set kissqy). Each set walks, moves and gets up with its own networks only.
+  python -m duck_runtime.run --calib calib.json --set policies --set policies_hd1910
 
 Keys:  1 enable (torque on, ease to HOME)   2 start policy   3 stop (back to HOME)
        0 limp (torque off)                  w/s vx +-0.05    z/c vy +-0.05
@@ -67,12 +68,13 @@ class Keys:
 def add_runner_args(ap: argparse.ArgumentParser) -> None:
     """Robot / policy / safety options shared by the terminal driver and the dashboard."""
     ap.add_argument("--backend", choices=["bridge", "feetech", "sim"], default="bridge")
-    ap.add_argument("--policy", help="61->14 ONNX gait (e.g. official velstand.onnx); with --set: overrides the "
-                    "walk slot of the first set")
+    ap.add_argument("--policy", help="61->14 ONNX gait (e.g. official velstand.onnx); with one --set: overrides "
+                    "its walk slot (refused with several --set: sets are never mixed)")
     ap.add_argument("--set", dest="policy_set", action="append",
                     help="directory with a set's manifest.json + .onnx (sit/stand, ground pick, kicks, roulade); "
-                         "give it twice (e.g. --set policies --set policies_hd1910) to switch between sets: "
-                         "key p in the terminal, the selector on the dashboard; the first one starts active")
+                         "give it twice (e.g. --set policies --set policies_hd1910) to switch between two "
+                         "complete, separate sets: key p in the terminal, the selector on the dashboard; the "
+                         "first one starts active")
     ap.add_argument("--rise-s", type=float, default=None,
                     help="with --set: seconds the sit/stand network drives the rise (manifest: 1.0)")
     ap.add_argument("--skill-duration", action="append", default=[], metavar="NAME=SECONDS",
@@ -170,10 +172,19 @@ def parse_skill_durations(items: list[str], ap: argparse.ArgumentParser) -> dict
 def load_sets(args, ap: argparse.ArgumentParser, base_tuning: Tuning) -> SetBank:
     from .policy_set import apply_walk_tuning, bind_keys, load_set
     paths = args.policy_set or []
+    if len(paths) > 1:
+        # Two sets = two complete, separate robots-worth of networks (official / kissqy): each one
+        # walks, sits, moves and gets up with its own networks and its own deployment settings.
+        mixed = [f for f, v in (("--policy", args.policy), ("--sitstand", args.sitstand),
+                                ("--action-scale", args.action_scale), ("--tuning trained", args.tuning != "official"))
+                 if v]
+        if mixed:
+            ap.error(f"{', '.join(mixed)}: not with several --set (each set runs only its own networks and "
+                     "settings); load one --set to try an override")
     durations = parse_skill_durations(getattr(args, "skill_duration", None) or [], ap)
     sets: list[LoadedSet] = []
     for i, path in enumerate(paths):
-        pset = load_set(path, walk=args.policy if i == 0 else None, sitstand=args.sitstand if i == 0 else None)
+        pset = load_set(path, walk=args.policy, sitstand=args.sitstand)
         if args.rise_s is not None and pset.sitstand is not None:
             pset.sitstand.rise_s = args.rise_s
         for name, sec in durations.items():

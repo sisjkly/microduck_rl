@@ -168,22 +168,10 @@ duck duck_runtime.run --calib calib.json --set policies --log set1.npz
   上力矩时把 RAM 里的 D 写成 0（地址 51），扭矩上限写成 1000（地址 48）。HD1910 出厂 RAM 是 P/D = 32/40，
   他之前的版本没写 D，所以 D=40 一直生效。**我们每次上力矩都写 P=5、D=0 并读回校验**（`bridge.py` `set_torque`），
   这一条早就有了。扭矩上限我们不写，用 `duck duck_runtime.tools regs` 看舵机上电后是多少（只读，站着也能跑）。
-- kissqy 实际跑的走路模型是他按 HD1910 自己训练的 velstand（`Mjlab-VelStand-Rough-Backlash-MicroDuck`，
-  P=5、820 g、2° 齿隙，sha256 `1cbf8730…`），观测/动作约定和 HOME 跟官方逐位一致，可以直接放进 walk 槽：
+- kissqy 用的是他按 HD1910 自己训练的整套模型（velstand `Mjlab-VelStand-Rough-Backlash-MicroDuck`，P=5、820 g、
+  2° 齿隙），本机实测（2026-10-26）零指令站立不晃。用法见下一节：**整套加载，不和官方模型混用**。
 
-```bash
-cd ~/microduck_rl/policies
-curl -fL -o kissqy_walk.onnx https://github.com/kissqy/Microduck-kissqy/raw/main/microduck-hd1910/firmware/policies/walk/policy.onnx
-cd ~/microduck_rl
-duck duck_runtime.dashboard --calib calib.json --set policies --policy policies/kissqy_walk.onnx --action-scale 1.0 --on-fall getup
-```
-
-  他的部署参数是动作幅度 1.0、头/腿低通 0.5/0.7（`deployment-execution.json`），后者就是我们的默认值。
-  仿真 835 g 对比（3 个种子）：零指令都站得住；vx=0.2 时 8 s 走 0.97 m（官方 0.9 幅度 0.58 m）。
-  **本机实测（2026-10-26）：换这个模型后零指令不晃了，推荐作为本机默认步态。**
-  坐站、捡、踢、滚仍用官方网络。他的模型只限个人非商业使用（见他仓库的 LICENSE）。
-
-### 5. 两套模型：kissqy（HD1910 自训）和官方，随时切换
+### 5. 两套模型：官方 和 kissqy（HD1910 自训），完全分开，随时切换
 
 kissqy 整套都是按 HD1910 训练的（P=5、820 g、官方观测约定和 HOME，逐个核对过）：走路、坐站、捡、左右踢、翻滚。
 在鸭子上一条命令下载（他仓库里的固件包，约 34 MB；六个模型都按 SHA-256 校验）并生成清单：
@@ -191,14 +179,19 @@ kissqy 整套都是按 HD1910 训练的（P=5、820 g、官方观测约定和 HO
 ```bash
 cd ~/microduck_rl && git pull
 duck duck_runtime.fetch_set kissqy            # -> policies_hd1910/（manifest.json + 6 个 onnx）
-duck duck_runtime.dashboard --calib calib.json --set policies_hd1910 --set policies --on-fall getup
+duck duck_runtime.dashboard --calib calib.json --set policies --set policies_hd1910 --on-fall getup
 ```
 
-- `--set` 给两次 = 两套都加载，第一个是启动时用的那套。面板“动作”卡片里的“模型套”下拉框，或键 `p` 切换；
-  终端版 `duck_runtime.run` 也是 `p`。**只有策略停止时能切**（先按 3），正在走的步态不会中途换网络。
-- 每套用它自己的部署参数（清单里写着，`policy_set.py` 读）：
+- `--set` 给两次 = 两套都加载，第一个是启动时用的那套（上面是官方；想默认 kissqy 就把两个 `--set` 对调）。
+  面板“动作”卡片里的“模型套”下拉框，或键 `p` 切换；终端版 `duck_runtime.run` 也是 `p`。
+  **只有策略停止时能切**（先按 3），正在走的步态不会中途换网络。
+- 两套完全分开：选了官方，走路、坐站、捡、踢、翻滚、**摔倒后翻身站起**全部是官方网络；选了 kissqy 全部是他的。
+  摔倒起身 = 卸力 → 摆站姿 → 交给**当前这套的走路网络**翻身。
+- 每套只用它自己的部署参数（清单里写着，`policy_set.py` 读）：
   官方 = 步态幅度 0.9、全局低通 0.5/0.7；kissqy = 步态幅度 1.0、低通 0.5/0.7，捡/踢/滚幅度 1.0 且**不加低通**
-  （他的 V167 就这么跑），坐站走全局低通。`--action-scale` 显式给了就对两套都生效；`--policy` 只替换第一套的步态。
+  （他的 V167 就这么跑），坐站走全局低通。
+- 加载两套时 `--policy`、`--sitstand`、`--action-scale`、`--tuning trained` 都会被拒绝（会把两套混起来）；
+  要试这些，只加载一套。`--skill-duration`（如 `roulade=3`）、`--rise-s` 对两套都生效。
 - 仿真对比（835 g，6 个种子，`scripts/rehearse_set.py --on-fall getup`，“站稳”= 5 s 后直立）：
 
 | 动作 | 理想供电 官方 / kissqy | 本机压降模型 官方 / kissqy | 满电 8.4 V（同样线路）官方 / kissqy |
@@ -209,8 +202,9 @@ duck duck_runtime.dashboard --calib calib.json --set policies_hd1910 --set polic
 | 左踢 | 6/6 / 6/6 | **6/6** / 0/6 | 6/6 / 6/6 |
 | 右踢 | 6/6 / 6/6 | **6/6** / 0/6 | 6/6 / 5/6 |
 
-  kissqy 的踢腿对掉压更敏感（给它加上全局低通也一样倒，所以不是滤波的事），翻滚比官方好；腿上的供电线路修好之前，
-  踢腿先用官方那套。零指令站立 kissqy 的步态在真机上不晃（2026-10-26），这是推荐默认用它的原因。
+  kissqy 的踢腿对掉压更敏感（给它加上全局低通也一样倒，所以不是滤波的事），翻滚比官方好。
+  摔倒起身（站立中被推倒，12 s 内站回来，向后/向前/侧向各 4 次）：理想供电 官方 12/12（向后 ~2.0 s）/ kissqy 12/12
+  （~2.6 s）；满电 7/12 / 6/12；本机压降 0/12 / 0/12，都卡在 ~40° 侧躺：起身成不成主要看供电。
 - 他的模型只限个人非商业使用（见他仓库的 LICENSE）；`fetch_set` 不把模型放进本仓库，只在鸭子上下载。
 
 ## 先在电脑上预演

@@ -354,7 +354,7 @@ def test_lowpass_out_of_range_is_refused(tmp_path):
         load_set(str(tmp_path), loader=loader)
 
 
-def test_load_sets_two_dirs_first_active_policy_override_on_the_first_only(tmp_path, monkeypatch):
+def test_load_sets_two_complete_sets_first_active(tmp_path, monkeypatch):
     import argparse
     import duck_runtime.policy_set as ps
     from duck_runtime.fetch_set import kissqy_manifest
@@ -381,10 +381,10 @@ def test_load_sets_two_dirs_first_active_policy_override_on_the_first_only(tmp_p
     r.stop()
     assert bank.switch(r, 1) is None and r.controller.policy is nets["velstand"] and bank.index == 1
     assert r.controller.tuning.action_scale == 0.9
-    args = ap.parse_args(["--set", str(tmp_path / "policies"), "--set", str(tmp_path / "policies_hd1910"),
-                          "--action-scale", "0.8"])
-    bank = load_sets(args, ap, Tuning.official())
-    assert [s.tuning.action_scale for s in bank.sets] == [0.8, 0.8]   # an explicit override wins everywhere
+    # complete sets: switching back brings the kissqy walk, its own skills and its own 1.0 scale
+    r.enable(); r.tick(); r.tick()
+    assert bank.switch(r, 0) is None and r.policies is bank.sets[0].pset
+    assert r.controller.tuning.action_scale == 1.0 and r.policies.skills["roulade"].lowpass == (1.0, 1.0)
 
 
 def test_skill_duration_override(tmp_path, monkeypatch):
@@ -412,3 +412,15 @@ def test_skill_duration_override(tmp_path, monkeypatch):
     assert len(sk["roulade"].policy.seen) == 150 and r.mode == "roulade"
     drive(r, 1, twist=(0.0, 0.0, 0.0))
     assert r.mode == "walk"
+
+
+def test_two_sets_refuse_anything_that_would_mix_them(tmp_path):
+    import argparse
+    from duck_runtime.run import add_runner_args, load_sets
+    ap = argparse.ArgumentParser()
+    add_runner_args(ap)
+    ap.error = lambda msg: (_ for _ in ()).throw(SystemExit(msg))
+    two = ["--set", str(tmp_path / "a"), "--set", str(tmp_path / "b")]
+    for extra in (["--policy", "x.onnx"], ["--sitstand", "y.onnx"], ["--action-scale", "0.8"], ["--tuning", "trained"]):
+        with pytest.raises(SystemExit, match="not with several --set"):
+            load_sets(ap.parse_args(two + extra), ap, Tuning.official())
