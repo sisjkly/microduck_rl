@@ -239,6 +239,8 @@ class Runner:
         self.controller.reset()
         self._clear_moves()
         self._run_t0 = s.t
+        self.reposes = 0                     # a fresh start gets the full set of re-poses
+        self._still_down = self._down_driving = 0.0
         self.state = State.RUN
         return True
 

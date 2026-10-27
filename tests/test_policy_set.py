@@ -479,3 +479,14 @@ def test_two_sets_refuse_anything_that_would_mix_them(tmp_path):
     for extra in (["--policy", "x.onnx"], ["--sitstand", "y.onnx"], ["--action-scale", "0.8"], ["--tuning", "trained"]):
         with pytest.raises(SystemExit, match="not with several --set"):
             load_sets(ap.parse_args(two + extra), ap, Tuning.official())
+
+
+def test_a_fresh_start_resets_the_repose_count(tmp_path):
+    """dash_20261027-085421.npz: restarted on the floor after 3 re-poses, none were left."""
+    r, _, io = running(tmp_path)
+    r.on_fall = "getup"
+    r.reposes = 3
+    r.stop()
+    for _ in range(10):
+        r.tick()
+    assert r.state is State.HOLD and r.start() and r.reposes == 0
