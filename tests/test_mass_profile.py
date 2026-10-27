@@ -98,8 +98,8 @@ def test_ours_835g_total_and_head(xml):
     assert np.all(I > 0) and np.all(I[:, 0] + I[:, 1] >= I[:, 2] * (1 - 1e-9))
 
 
-def test_default_profile_is_the_robot_with_the_new_head():
-    assert mp.DEFAULT_PROFILE == "ours_818g"
+def test_default_profile_is_the_robot_with_the_original_head():
+    assert mp.DEFAULT_PROFILE == "ours_835g"
 
 
 @pytest.mark.parametrize("xml", VARIANTS)

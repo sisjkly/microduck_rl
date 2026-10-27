@@ -143,6 +143,9 @@ ESP32 桥接固件原本只管 ID 1–14，嘴的舵机从来没被读写过。�
 - 踢腿和翻滚用 1.0 的动作幅度：官方源码注释写明"踢腿按站立幅度（1.0）调的"，但官方程序只在有独立站立网络时
   才用到它，velstand 没有，结果官方现在实际按步态的 0.9 跑。0.9 下右踢在本机摔倒（dash_20261023-104355.npz）；
   仿真按本机电池压降：0.9 摔 3/6，1.0 摔 0/6，左踢两者都不摔。
+- **某一套固定的本机设置**放在那套目录里的 `overrides.json`（重新下载清单或 `fetch_set` 不会覆盖它），
+  例如官方翻滚默认 2 s：`echo '{"skills": {"roulade": {"duration_s": 2.0}}}' > ~/microduck_rl/policies/overrides.json`。
+  只影响这一套；启动时列表里显示 `r=roulade (2 s)`。命令行 `--skill-duration` 仍然优先（两套都改）。
 - 动作网络驱动多久再交回步态用 `--skill-duration 名字=秒` 改（可写多次，两套都生效），例如翻滚 3 s：
   `--skill-duration roulade=3`。翻滚的训练回合是 5 s（`microduck_roulade_env_cfg.py` `EPISODE_LENGTH_S`），
   翻过去、落地、站稳都学过，3 s 仍在训练范围内；官方 1 s 交回时身体还斜 ~70°。仿真（835 g，6 个种子，摔倒起身）：

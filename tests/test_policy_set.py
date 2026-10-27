@@ -490,3 +490,39 @@ def test_a_fresh_start_resets_the_repose_count(tmp_path):
     for _ in range(10):
         r.tick()
     assert r.state is State.HOLD and r.start() and r.reposes == 0
+
+
+def test_overrides_file_sets_this_robots_move_windows_per_set(tmp_path):
+    loader, nets = make_set(tmp_path)
+    (tmp_path / "overrides.json").write_text(json.dumps({"skills": {"roulade": {"duration_s": 2.0}}}))
+    s = load_set(str(tmp_path), loader=loader)
+    assert s.skills["roulade"].duration_s == 2.0 and s.skills["kick_left"].duration_s == 0.5
+    for bad in ({"skills": {"flip": {"duration_s": 2}}}, {"skills": {"roulade": {"duration_s": 60}}},
+                {"skills": {"roulade": {"action_scale": 0.5}}}):
+        (tmp_path / "overrides.json").write_text(json.dumps(bad))
+        with pytest.raises(ValueError):
+            load_set(str(tmp_path), loader=loader)
+
+
+def test_overrides_apply_to_their_own_set_only_and_the_cli_still_wins(tmp_path, monkeypatch):
+    import argparse
+    import duck_runtime.policy_set as ps
+    from duck_runtime.fetch_set import kissqy_manifest
+    from duck_runtime.run import add_runner_args, load_sets
+    (tmp_path / "policies").mkdir()
+    (tmp_path / "policies_hd1910").mkdir()
+    loader, _ = make_set(tmp_path / "policies")
+    loader2, _ = make_set(tmp_path / "policies_hd1910", manifest=kissqy_manifest())
+    (tmp_path / "policies" / "overrides.json").write_text(json.dumps({"skills": {"roulade": {"duration_s": 2.0}}}))
+    real_load_set = ps.load_set
+    monkeypatch.setattr(ps, "load_set", lambda d, **kw: real_load_set(
+        d, loader=lambda path: (loader2 if "hd1910" in path else loader)(path), **kw))
+    ap = argparse.ArgumentParser()
+    add_runner_args(ap)
+    two = ["--set", str(tmp_path / "policies"), "--set", str(tmp_path / "policies_hd1910")]
+    bank = load_sets(ap.parse_args(two), ap, Tuning.official())
+    assert bank.sets[0].pset.skills["roulade"].duration_s == 2.0      # official: its overrides.json
+    assert bank.sets[1].pset.skills["roulade"].duration_s == 1.0      # kissqy: untouched
+    assert "roulade (2 s)" in bank.sets[0].summary()
+    bank = load_sets(ap.parse_args(two + ["--skill-duration", "roulade=3"]), ap, Tuning.official())
+    assert [s.pset.skills["roulade"].duration_s for s in bank.sets] == [3.0, 3.0]

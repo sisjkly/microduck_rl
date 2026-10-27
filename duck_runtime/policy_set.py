@@ -150,10 +150,42 @@ def load_set(directory: str, walk: str | None = None, sitstand: str | None = Non
         raise ValueError(f"{directory}: no walk policy (manifest slot 'walk' or --policy)")
     if sitstand is not None:
         ss = SitStand(loader(path(sitstand)))
+    apply_overrides(directory, skills)
     return PolicySet(loader(path(walk_file)), walk_file, ss, skills,
                      walk_action_scale=walk_scale, walk_lowpass=walk_lp,
                      description=str(man.get("description", "")),
                      servos=str((man.get("robot") or {}).get("servos", "")))
+
+
+OVERRIDES_FILE = "overrides.json"
+
+
+def apply_overrides(directory: str, skills: dict[str, "Skill"]) -> dict:
+    """This robot's own settings for one set, kept next to its manifest in ``overrides.json``
+    (re-downloading the Hub manifest or re-running fetch_set leaves it alone):
+
+        {"skills": {"roulade": {"duration_s": 2.0}}}
+
+    Only move windows for now. Returns what was applied (for the startup printout)."""
+    p = os.path.join(directory, OVERRIDES_FILE)
+    if not os.path.exists(p):
+        return {}
+    with open(p) as f:
+        ov = json.load(f)
+    applied = {}
+    for name, fields in (ov.get("skills") or {}).items():
+        if name not in skills:
+            raise ValueError(f"{p}: no move named {name!r} in this set ({', '.join(skills) or 'none'})")
+        unknown = set(fields) - {"duration_s"}
+        if unknown:
+            raise ValueError(f"{p}: {name}: only duration_s can be overridden, not {sorted(unknown)}")
+        if "duration_s" in fields:
+            v = float(fields["duration_s"])
+            if not 0.1 <= v <= 10.0:
+                raise ValueError(f"{p}: {name}: duration_s {v} outside 0.1..10 s")
+            skills[name].duration_s = v
+            applied[name] = v
+    return applied
 
 
 def apply_walk_tuning(pset: PolicySet, tuning, action_scale_override: float | None = None):

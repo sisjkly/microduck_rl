@@ -267,7 +267,7 @@ def main(argv=None):
                     help="battery sag model: ideal = training-like (7.6 V, floor 6 V); robot = this robot's "
                          "measured sag (set6.npz: 7.5 V idle, ~4.6 V in a rise, 3-4 V in a kick); "
                          "robot-full = same wiring with a fully charged 8.4 V pack")
-    ap.add_argument("--profile", default="ours_818g", help="mass profile: ours_818g (new head) | ours_835g | official | ...")
+    ap.add_argument("--profile", default="ours_835g", help="mass profile: ours_835g (this robot) | ours_818g (new head, reverted) | official | ...")
     ap.add_argument("--on-fall", choices=["limp", "keep", "getup"], default="limp")
     ap.add_argument("--action-scale", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
