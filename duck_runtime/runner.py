@@ -112,6 +112,15 @@ class Runner:
     limp_fall_still_s: float = 0.2
     limp_fall_max_s: float = 1.5          # stop waiting for stillness after this
     limp_fall_pose_s: float = 0.6
+    # on_fall="getup", beyond robotd: a robot lying still is re-posed (ease into the stand pose,
+    # hand back to the gait). velstand has fixed points on the floor: dash_20261027-071329.npz
+    # lay on its side 5 s with the gait outputting one constant pose; SimIO started from that
+    # exact state reproduces it (any target clamp) and one re-pose stands it up (0.5-2.9 s,
+    # both sets, ideal and full-pack supply). Covers what limp-fall cannot: starting the policy
+    # on the floor, and a fall inside a move (no limp-fall during moves, as robotd).
+    stuck_rate: float = 0.3               # rad/s: |gyro| below this counts as lying still
+    stuck_repose_s: float = 1.0           # still this long while down -> re-pose
+    max_reposes: int = 3                  # then the get-up timeout decides (limp)
 
     def __post_init__(self):
         self.state = State.LIMP
@@ -126,6 +135,8 @@ class Runner:
         self.fall_events = 0          # falls that cut torque
         self.falls_seen = 0           # every fall verdict while running (keep mode gets up)
         self._was_fallen = False
+        self._still_down = 0.0
+        self.reposes = 0              # re-poses since the robot was last upright
         self._run_t0 = 0.0
         self.refusal = ""
         self.stand_pose = DEFAULT_POSITION.copy()
@@ -307,6 +318,20 @@ class Runner:
                     self.mode = "fall:limp"
             else:
                 self.predictor.reset()
+        if not fallen:
+            self._still_down, self.reposes = 0.0, 0
+        elif (self.state is State.RUN and self.on_fall == "getup" and self.fall_seq is None
+                and not (self.busy or self.sit == "sitting") and s.imu_ready):
+            # Lying still is stuck, not getting up: re-pose (torque is on: no limp phase).
+            if float(np.linalg.norm(s.imu.gyro)) < self.stuck_rate:
+                self._still_down += self.io.control_dt
+            else:
+                self._still_down = 0.0
+            if self._still_down >= self.stuck_repose_s - 1e-9 and self.reposes < self.max_reposes:
+                self.reposes += 1
+                self._still_down = 0.0
+                self.fall_seq = {"phase": "pose", "since": s.t, "from": s.positions.copy()}
+                self.mode = "fall:pose"
         if (self.state is State.RUN and fallen and not (self.busy or self.sit == "sitting")
                 and s.t >= self._grace_until and self.fall_seq is None):
             if self.on_fall == "limp":

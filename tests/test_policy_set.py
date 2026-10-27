@@ -249,9 +249,51 @@ def test_getup_limp_fall_sequence(tmp_path):
     drive(r, 8)
     assert r.fall_seq is None and r.mode == "walk" and r.state is State.RUN
     assert len(nets["velstand"].seen) > n_walk
-    # Still down 5 s after the hand-back: give up and limp.
-    drive(r, 260)
+    # Lying still after the hand-back: re-posed after 1 s, at most 3 times, then still down
+    # 5 s after the last hand-back -> give up and limp.
+    drive(r, 51)
+    assert r.fall_seq and r.fall_seq["phase"] == "pose" and r.reposes == 1
+    drive(r, 2 * (51 + 30) + 30 + 260)
+    assert r.reposes == 3
     assert r.state is State.LIMP and r.fall_events == 1 and "still down" in r.refusal
+
+
+def test_getup_reposes_a_robot_lying_still_after_a_start_on_the_floor_or_a_move(tmp_path):
+    """dash_20261027-071329.npz: started on its side / fell inside a kick, the gait held one pose."""
+    r, nets, io = running(tmp_path)
+    r.on_fall = "getup"
+    io.gravity = np.array([0.0, 1.0, 0.0])               # on its side, perfectly still
+    drive(r, 10)
+    assert r.fall_seq is None and r.mode == "walk"       # not yet: 0.2 s debounce + 1 s still
+    drive(r, 51)
+    assert r.fall_seq and r.fall_seq["phase"] == "pose" and r.mode == "fall:pose" and r.reposes == 1
+    assert io.torque_calls == [True]                     # torque stays on: no limp phase
+    target_end = r.stand_pose
+    drive(r, 30)
+    assert r.fall_seq is None and r.mode == "walk"
+    # moving (thrashing to get up) is not stuck
+    io.gyro = np.array([0.0, 1.5, 0.0])
+    drive(r, 100)
+    assert r.reposes == 1
+    io.gyro = np.zeros(3)
+    io.gravity = np.array([0.0, 0.0, -1.0])               # up: the count starts over
+    drive(r, 15)
+    assert r.reposes == 0 and r.state is State.RUN
+    # a fall inside a move: nothing while the move runs, re-posed once it ends and it lies still
+    assert r.trigger("kick_left") is None
+    io.gravity = np.array([1.0, 0.0, 0.0])
+    drive(r, 24)
+    assert r.fall_seq is None and r.mode == "kick_left"
+    drive(r, 2 + 51)
+    assert r.fall_seq and r.fall_seq["phase"] == "pose"
+
+
+def test_keep_mode_never_reposes(tmp_path):
+    r, _, io = running(tmp_path)
+    r.on_fall = "keep"
+    io.gravity = np.array([0.0, 1.0, 0.0])
+    drive(r, 200)
+    assert r.fall_seq is None and r.reposes == 0
 
 
 def test_getup_ignores_footfalls_moves_and_robots_already_down(tmp_path):
