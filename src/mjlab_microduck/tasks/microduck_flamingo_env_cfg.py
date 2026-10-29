@@ -19,8 +19,8 @@ Physics facts this cfg is built on (CPU MuJoCo + training BAM M6 actuator, 2026-
   - No ankle roll + hip-roll axis 24 mm inboard of the sole + sole half-width 17.8 mm
     ⇒ the CoM only enters a single sole with ≥ ~15° of trunk lean toward the support
     side (head used as counterweight) / ~16-20° with the head fixed. At 25° lean the
-    solved pose below keeps its CoM 13.2 mm inside the sole edge (6.8 mm with the head
-    fixed); the support hip_roll then sits at its 0.9 soft limit (-0.345).
+    solved swan pose below keeps its CoM 14.8 mm inside the sole edge; the support
+    hip_roll then sits at its 0.9 soft limit (-0.345).
   - Static holding torques ≤ 0.27 N·m vs a 0.78-0.96 N·m budget, BUT the soft servos
     sag 0.3-0.5 rad under that load: the policy must command offsets (gravity
     feed-forward). Action scale 1.0 + wide ctrlrange allow it.
@@ -40,8 +40,9 @@ Reward design (AGENTS.md rules applied):
     jackpot for arriving early, the path is free.
   - Multiplicative composite (contact × upright × pose × CoM): a lean-without-lift or
     lift-without-balance compromise collapses on its weakest factor.
-  - Contact pattern is binary and gated on not being toppled; the swing-lift term only
-    pays while the support sole is down → hopping and lying both lose.
+  - Contact pattern is binary and gated on not being toppled; the swing-lift and
+    swing-behind terms only pay while the support sole is down → hopping and lying both
+    lose. swing-behind fixes the lift DIRECTION (backward, swan style).
   - Every non-sole ground contact costs; falls terminate past 50° (target lean 25°).
   - Positive task mass ≈ sitstand's, so its sim2real regularisers keep their RELATIVE
     strength. Penalty signs: mjlab costs (≥ 0) negative weight; self-negating
@@ -81,16 +82,21 @@ ONE_FOOT_PROB = 0.5           # P(resample commands one foot) — all four (star
 RAMP_S = 1.0                  # alpha 0 ↔ 1 slew time (reward reference only; obs = raw flag)
 
 # ── Solved one-foot pose (RIGHT foot down), servo order 0-4 L leg, 5-8 head, 9-13 R leg.
-# pose_solve.py (2026-10-29): support sole flat, CoM 13.2 mm inside the sole edge, swing
-# sole 52 mm up (site 69 mm), trunk lean 25.0°, no self-contact (swing leg ≥ 4 mm from the
-# support leg, 43 mm from the trunk), every hip joint ≥ 0.0386 rad from its hard stop,
-# head used as counterweight. LEFT = L/R mirror. An earlier solve (margin 15.1 mm) had the
-# swing shin 6 mm INSIDE the trunk shell — caught by the pre-training reward audit
-# (self_collisions -1.32/step on the target itself).
+# SWAN / attitude style (v2, 2026-10-29): the swing leg is lifted BACKWARD — thigh back,
+# knee folded (-1.33 rad), foot 66 mm behind the support foot along the trunk heading and
+# 118 mm off the floor (lowest sole point; site 153 mm). pose_solve.py with BEHIND=0.04,
+# MIN_LIFT=0.04, MAX_LIFT=0.12, MAX_TILT=25, hip_yaw + head free: support sole flat, CoM
+# 14.8 mm inside the sole edge, trunk lean 24.9°, no self-contact (swing leg 25 mm from
+# the support leg, 4.4 mm from the trunk), every hip joint ≥ 0.0386 rad from its hard
+# stop, head used as counterweight (head_yaw -1.48). LEFT = L/R mirror.
+# v1 lifted the leg FORWARD (foot 43 mm in front, margin 13.2 mm) — trained fine but was
+# not the intended motion. The hand-written probe controller holds v1 6/6 but this pose
+# only 1-2/6 with the same (stance-tuned) ankle gains: a pitch oscillation, the CoM stays
+# 9-13 mm inside the sole — a probe-gain issue, see the gain sweep in the physics notes.
 POSE_RIGHT = (
-    0.2888, -0.3452, -1.4131, 0.3845, 0.3635,      # left leg (swing)
-    -0.7234, 0.0447, -1.4246, -0.245,              # neck_pitch, head_pitch, head_yaw, head_roll
-    -0.4755, -0.3453, 1.1983, 0.8152, -0.4401,     # right leg (support)
+    -0.1217, 0.3431, 0.6277, -1.3316, 0.5811,      # left leg (swing)
+    0.6771, 0.0556, -1.4792, -0.374,               # neck_pitch, head_pitch, head_yaw, head_roll
+    0.3872, -0.3454, 0.5814, 0.7742, 0.2404,       # right leg (support)
 )
 
 
@@ -103,14 +109,15 @@ def mirror_pose(p):
 
 POSE_LEFT = mirror_pose(POSE_RIGHT)
 # Trunk state of POSE_RIGHT with the support sole flat on the floor (harness.place_on_floor).
-POSE_TRUNK_Z = 0.12897
-POSE_QUAT_RIGHT = (0.9497, 0.21513, 0.02312, -0.22637)
-GRAV_B_RIGHT = (0.1413, -0.3982, -0.9064)      # projected gravity, body frame, at POSE_RIGHT
+POSE_TRUNK_Z = 0.12647
+POSE_QUAT_RIGHT = (0.95876, 0.21511, -0.01812, 0.18487)
+GRAV_B_RIGHT = (-0.1143, -0.4058, -0.9068)     # projected gravity, body frame, at POSE_RIGHT
 
 _LEG_JOINTS = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
 
 # ── Reward constants ──────────────────────────────────────────────────────────
-SWING_LIFT_TARGET = 0.06      # m, foot-site height (pose: 0.069 site / 0.052 lowest sole point)
+SWING_LIFT_TARGET = 0.08      # m, foot-site height (pose: 0.153 site / 0.118 lowest sole point)
+SWING_BEHIND_TARGET = 0.05    # m, swing foot behind the support foot along the trunk heading (pose: 0.066)
 COM_STD = 0.015               # m — ≈ the sole half-width: the margin that decides holds
 UPRIGHT_STD = 0.25            # |Δg| ≈ 14° — wide enough that the current policy scores
 POSE_STD = 0.5                # rad, legs (HOME → pose deltas up to ~0.96 rad)
@@ -181,6 +188,11 @@ def make_microduck_flamingo_env_cfg(play: bool = False, rough: bool = False) -> 
     cfg.rewards["flamingo_swing_lift"] = RewardTermCfg(
         func=microduck_mdp.flamingo_swing_lift, weight=1.5,
         params={**common, "sensor_name": feet, "target_height": SWING_LIFT_TARGET, "gate_tilt_deg": 45.0},
+    )
+    # Lift DIRECTION: backward (swan). The leg-pose Gaussian is too loose to pin it alone.
+    cfg.rewards["flamingo_swing_behind"] = RewardTermCfg(
+        func=microduck_mdp.flamingo_swing_behind, weight=1.5,
+        params={**common, "sensor_name": feet, "target_dist": SWING_BEHIND_TARGET, "gate_tilt_deg": 45.0},
     )
     cfg.rewards["flamingo_com"] = RewardTermCfg(
         func=microduck_mdp.flamingo_com_over_support, weight=2.0,

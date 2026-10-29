@@ -53,7 +53,7 @@ def test_sit_stack_removed(cfg):
 
 def test_reward_signs(cfg):
     r = cfg.rewards
-    for name in ("flamingo_composite", "flamingo_contact", "flamingo_swing_lift", "flamingo_com",
+    for name in ("flamingo_composite", "flamingo_contact", "flamingo_swing_lift", "flamingo_swing_behind", "flamingo_com",
                  "flamingo_upright", "flamingo_pose", "flamingo_stillness"):
         assert r[name].weight > 0, name
     # mjlab-style costs (>= 0) → negative weight
@@ -113,3 +113,31 @@ def test_backlash_variant_model():
     m = load_env_cfg(TASKS[1]).scene.entities["robot"].spec_fn().compile()
     names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(m.njnt)]
     assert sum(n.startswith("passive_") and n.endswith("_backlash") for n in names) == 14
+
+
+_JOINTS = ["left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
+           "neck_pitch", "head_pitch", "head_yaw", "head_roll",
+           "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle"]
+
+
+@pytest.mark.parametrize("side", ["right", "left"])
+def test_target_pose_lifts_leg_backward(side, model):
+    """Swan style: the target's swing foot is BEHIND the support foot (along the trunk
+    heading) by at least the reward's target distance, and well off the floor."""
+    d = mujoco.MjData(model)
+    pose = fl.POSE_RIGHT if side == "right" else fl.POSE_LEFT
+    quat = np.array(fl.POSE_QUAT_RIGHT)
+    if side == "left":
+        quat[1], quat[3] = -quat[1], -quat[3]
+    d.qpos[:3] = (0, 0, fl.POSE_TRUNK_Z)
+    d.qpos[3:7] = quat / np.linalg.norm(quat)
+    for j, v in zip(_JOINTS, pose):
+        d.qpos[model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, j)]] = v
+    mujoco.mj_kinematics(model, d)
+    site = lambda n: d.site_xpos[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, n)]
+    swing, sup = ("left", "right") if side == "right" else ("right", "left")
+    tb = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "trunk_base")
+    fwd = d.xmat[tb].reshape(3, 3)[:, 0].copy(); fwd[2] = 0; fwd /= np.linalg.norm(fwd)
+    behind = -np.dot(site(f"{swing}_foot") - site(f"{sup}_foot"), fwd)
+    assert behind >= fl.SWING_BEHIND_TARGET, behind
+    assert site(f"{swing}_foot")[2] - site(f"{sup}_foot")[2] >= fl.SWING_LIFT_TARGET
