@@ -7872,6 +7872,41 @@ def flamingo_swing_lift(
     return alpha * frac * sup_down * _flamingo_upright_gate(env, asset, gate_tilt_deg)
 
 
+def flamingo_swing_behind_dist(env: ManagerBasedRlEnv, command_name: str, asset: Entity) -> torch.Tensor:
+    """(N,) how far the swing foot is BEHIND the support foot along the trunk's horizontal
+    heading (m, > 0 = behind)."""
+    _, side = _flamingo_state(env, command_name)
+    l, r = _flamingo_foot_site_ids(asset)
+    p = asset.data.site_pos_w
+    sw = torch.where((side > 0).unsqueeze(-1), p[:, l], p[:, r])
+    sup = torch.where((side > 0).unsqueeze(-1), p[:, r], p[:, l])
+    fwd = quat_apply(asset.data.root_link_quat_w,
+                     torch.tensor([1.0, 0.0, 0.0], device=env.device).expand(p.shape[0], 3))
+    fwd_xy = fwd[:, :2] / fwd[:, :2].norm(dim=1, keepdim=True).clamp_min(1e-6)
+    return -torch.sum((sw - sup)[:, :2] * fwd_xy, dim=1)
+
+
+def flamingo_swing_behind(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    target_dist: float,
+    gate_tilt_deg: float = 45.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """alpha · clamp(behind / target, 0, 1): the swing leg is lifted BACKWARD (swan /
+    attitude style), measured along the trunk heading. Same gates as swing_lift (support
+    sole down, trunk up). The leg-pose Gaussian alone (std 0.5 rad over 10 joints) is too
+    loose to pin the lift direction — the first run lifted the leg in FRONT (-43 mm)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    alpha, side = _flamingo_state(env, command_name)
+    behind = flamingo_swing_behind_dist(env, command_name, asset)
+    f = _flamingo_feet_found(env, sensor_name)
+    sup_down = torch.where(side > 0, f[:, 1], f[:, 0]).float()
+    frac = torch.clamp(behind / target_dist, 0.0, 1.0)
+    return alpha * frac * sup_down * _flamingo_upright_gate(env, asset, gate_tilt_deg)
+
+
 def flamingo_whole_body_com(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
     """(N, 3) whole-robot CoM = MuJoCo subtree_com of the robot's root body (follows mass DR)."""
     root = int(asset.indexing.body_ids[0])
