@@ -7704,3 +7704,343 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Flamingo (single-leg stand ↔ two feet, either side) — microduck_flamingo_env_cfg.py
+#
+# Command contract (community flamingo-cycle convention, tests/test_publish_manifest.py):
+#   twist = [flag, side, 0]   flag 0 = two feet, 1 = one foot;
+#                             side +1 = RIGHT foot down (left lifted), -1 = LEFT foot down;
+#                             idle / two feet = [0, 0, 0].
+# The side lives in the vy slot, which symmetry.py already negates under the L/R mirror.
+# Rewards read a SLEWED blend alpha (0 = two-feet target, 1 = one-foot target) and an
+# ACTIVE support side, both owned by FlamingoCommand — the sitstand anti-jackpot
+# mechanism: being ahead of the ramp pays nothing extra.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FLAMINGO_SITE_Z_STAND = 0.0      # foot site height above the floor with the sole flat (measured: 0.1 mm)
+
+
+def _flamingo_foot_site_ids(asset: Entity) -> tuple[int, int]:
+    ids, _ = asset.find_sites(("left_foot", "right_foot"), preserve_order=True)
+    return ids[0], ids[1]
+
+
+def _flamingo_foot_heights(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
+    """(N, 2) [left, right] foot-site height above the env's ground (flat terrain)."""
+    l, r = _flamingo_foot_site_ids(asset)
+    z = asset.data.site_pos_w[:, [l, r], 2] - env.scene.terrain.env_origins[:, 2:3]
+    return torch.nan_to_num(z - FLAMINGO_SITE_Z_STAND, nan=0.0)
+
+
+class FlamingoCommand(UniformVelocityCommand):
+    """cmd = [flag, side, 0] with dwell-time resampling, a slewed target blend ``alpha``
+    and an ``active_side`` (+1 right support / -1 left support) the rewards use.
+
+    - alpha slews toward the flag at 1/ramp_s per second.
+    - A side change while lifted first slews alpha to 0 (put the foot down), and only
+      then switches active_side — the policy is never asked to swap feet mid-air.
+    - On the first compute of an episode alpha/active_side are initialised from the
+      ACTUAL spawn state (a foot more than ``lift_detect_h`` up => one-foot spawn),
+      because mjlab resets commands AFTER the reset events (sitstand's same fix).
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._env_ref = env
+        self._alpha = torch.zeros(self.num_envs, device=self.device)
+        self._active_side = torch.ones(self.num_envs, device=self.device)
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.vel_command_b
+
+    @property
+    def alpha(self) -> torch.Tensor:
+        return self._alpha
+
+    @property
+    def active_side(self) -> torch.Tensor:
+        return self._active_side
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        n = len(env_ids)
+        if n == 0:
+            return
+        flag = (torch.rand(n, device=self.device) < self.cfg.one_foot_prob).float()
+        side = torch.where(torch.rand(n, device=self.device) < 0.5, -1.0, 1.0)
+        self.vel_command_b[env_ids] = 0.0
+        self.vel_command_b[env_ids, 0] = flag
+        self.vel_command_b[env_ids, 1] = flag * side
+
+    def compute(self, dt: float) -> None:
+        super().compute(dt)
+        fresh = self._env_ref.episode_length_buf <= 1
+        if fresh.any():
+            h = _flamingo_foot_heights(self._env_ref, self.robot)          # (N, 2) left, right
+            lifted = h.max(dim=1).values > self.cfg.lift_detect_h
+            right_down = h[:, 1] < h[:, 0]
+            spawn_side = torch.where(right_down, 1.0, -1.0)
+            cmd_side = torch.where(self.vel_command_b[:, 1] != 0, torch.sign(self.vel_command_b[:, 1]), spawn_side)
+            self._alpha = torch.where(fresh, lifted.float(), self._alpha)
+            self._active_side = torch.where(fresh, torch.where(lifted, spawn_side, cmd_side), self._active_side)
+        flag = self.vel_command_b[:, 0]
+        want_side = torch.sign(self.vel_command_b[:, 1])
+        swap = (flag > 0.5) & (want_side != 0) & (want_side != self._active_side)
+        target = torch.where(swap, torch.zeros_like(flag), flag)
+        step = dt / max(self.cfg.ramp_s, 1e-6)
+        self._alpha += torch.clamp(target - self._alpha, -step, step)
+        down = self._alpha <= 1e-6
+        self._active_side = torch.where(swap & down, want_side, self._active_side)
+
+    def _update_command(self) -> None:
+        pass
+
+    def _update_metrics(self) -> None:
+        pass
+
+
+@_dataclass(kw_only=True)
+class FlamingoCommandCfg(UniformVelocityCommandCfg):
+    one_foot_prob: float = 0.5     # P(resample commands one foot)
+    ramp_s: float = 1.0            # seconds for alpha to traverse 0 <-> 1
+    lift_detect_h: float = 0.03    # spawn-state detection threshold (foot-site height, m)
+
+    def build(self, env: ManagerBasedRlEnv) -> "FlamingoCommand":
+        return FlamingoCommand(self, env)
+
+
+def _flamingo_state(env: ManagerBasedRlEnv, command_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+    term = env.command_manager.get_term(command_name)
+    return term.alpha, term.active_side
+
+
+def _flamingo_feet_found(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+    """(N, 2) bool [left, right] sole-on-ground (sensor pattern lists LEFT first)."""
+    found = env.scene.sensors[sensor_name].data.found
+    if found.dim() == 3:
+        found = found.any(dim=-1)
+    return found > 0
+
+
+def _flamingo_upright_gate(env: ManagerBasedRlEnv, asset: Entity, gate_tilt_deg: float) -> torch.Tensor:
+    g = asset.data.projected_gravity_b
+    return (-g[:, 2] > math.cos(math.radians(gate_tilt_deg))).float()
+
+
+def flamingo_contact_pattern(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    gate_tilt_deg: float = 45.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """alpha·[support down AND swing up] + (1-alpha)·[both down], zero when toppled.
+    Binary per state: hopping on the support foot, touching the swing foot down, or
+    lifting a foot under a two-feet command all lose it."""
+    asset: Entity = env.scene[asset_cfg.name]
+    alpha, side = _flamingo_state(env, command_name)
+    f = _flamingo_feet_found(env, sensor_name)
+    L, R = f[:, 0], f[:, 1]
+    sup_right = side > 0
+    sup_down = torch.where(sup_right, R, L)
+    sw_down = torch.where(sup_right, L, R)
+    one = (sup_down & ~sw_down).float()
+    two = (L & R).float()
+    return (alpha * one + (1 - alpha) * two) * _flamingo_upright_gate(env, asset, gate_tilt_deg)
+
+
+def flamingo_swing_lift(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    target_height: float,
+    gate_tilt_deg: float = 45.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """alpha · clamp(swing-foot height / target, 0, 1), only while the SUPPORT sole is
+    down and the trunk is up — a 1 mm hover pays ~nothing, lying down pays nothing."""
+    asset: Entity = env.scene[asset_cfg.name]
+    alpha, side = _flamingo_state(env, command_name)
+    h = _flamingo_foot_heights(env, asset)
+    sup_right = side > 0
+    h_sw = torch.where(sup_right, h[:, 0], h[:, 1])
+    f = _flamingo_feet_found(env, sensor_name)
+    sup_down = torch.where(sup_right, f[:, 1], f[:, 0]).float()
+    frac = torch.clamp(h_sw / target_height, 0.0, 1.0)
+    return alpha * frac * sup_down * _flamingo_upright_gate(env, asset, gate_tilt_deg)
+
+
+def flamingo_whole_body_com(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
+    """(N, 3) whole-robot CoM = MuJoCo subtree_com of the robot's root body (follows mass DR)."""
+    root = int(asset.indexing.body_ids[0])
+    return env.sim.data.subtree_com[:, root]
+
+
+def flamingo_com_over_support(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    std: float,
+    center_offset_x: float = 0.007,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """alpha · exp(-|CoM_xy - support-sole centre_xy|² / std²).
+    Sole centre = support foot site + center_offset_x along the foot's x axis (the
+    measured footprint spans x ∈ [-16.7, +30.7] mm around the site, y ± 17.8 mm)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    alpha, side = _flamingo_state(env, command_name)
+    l, r = _flamingo_foot_site_ids(asset)
+    sup = torch.where((side > 0).unsqueeze(-1), asset.data.site_pos_w[:, r], asset.data.site_pos_w[:, l])
+    sup_q = torch.where((side > 0).unsqueeze(-1), asset.data.site_quat_w[:, r], asset.data.site_quat_w[:, l])
+    fwd = quat_apply(sup_q, torch.tensor([1.0, 0.0, 0.0], device=env.device).expand_as(sup))
+    centre = sup[:, :2] + center_offset_x * fwd[:, :2]
+    com = flamingo_whole_body_com(env, asset)[:, :2]
+    d2 = torch.sum(torch.square(com - centre), dim=1)
+    return alpha * torch.exp(-d2 / std**2)
+
+
+def _flamingo_gravity_target(env: ManagerBasedRlEnv, command_name: str, grav_right: tuple) -> torch.Tensor:
+    """Target projected gravity (body frame): (0,0,-1) blended toward the one-foot pose's,
+    mirrored for the left side (negate y)."""
+    alpha, side = _flamingo_state(env, command_name)
+    g1 = torch.tensor(grav_right, device=env.device).expand(alpha.shape[0], 3).clone()
+    g1[:, 1] = g1[:, 1] * side
+    g0 = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand_as(g1)
+    g = (1 - alpha).unsqueeze(-1) * g0 + alpha.unsqueeze(-1) * g1
+    return g / g.norm(dim=1, keepdim=True).clamp_min(1e-6)
+
+
+def flamingo_upright(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    grav_right: tuple,
+    std: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """exp(-|g_b - g_target|² / std²): upright measured against the COMMANDED lean.
+    A single-leg stance needs ~25° of trunk lean over the support foot (no ankle roll,
+    hip-roll axis 24 mm inboard of the sole) — the stock upright term would tax it."""
+    asset: Entity = env.scene[asset_cfg.name]
+    gt = _flamingo_gravity_target(env, command_name, grav_right)
+    return torch.exp(-torch.sum(torch.square(asset.data.projected_gravity_b - gt), dim=1) / std**2)
+
+
+def _flamingo_joint_target(env, asset, command_name, pose_right, pose_left):
+    alpha, side = _flamingo_state(env, command_name)
+    home = _servo_default_joint_pos(env, asset)
+    pr = torch.tensor(pose_right, device=env.device).expand_as(home)
+    pl = torch.tensor(pose_left, device=env.device).expand_as(home)
+    one = torch.where((side > 0).unsqueeze(-1), pr, pl)
+    return (1 - alpha).unsqueeze(-1) * home + alpha.unsqueeze(-1) * one
+
+
+def flamingo_pose(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    pose_right: tuple,
+    pose_left: tuple,
+    joint_indices: list,
+    std: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """exp(-mean_j (q_j - target_j)² / std²) on the given servo joints; target = HOME
+    blended toward the side's one-foot pose by alpha."""
+    asset: Entity = env.scene[asset_cfg.name]
+    tgt = _flamingo_joint_target(env, asset, command_name, pose_right, pose_left)
+    q = _servo_joint_pos(env, asset)
+    err = torch.square(q[:, joint_indices] - tgt[:, joint_indices]).mean(dim=1)
+    return torch.exp(-err / std**2)
+
+
+def flamingo_composite(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    pose_right: tuple,
+    pose_left: tuple,
+    joint_indices: list,
+    grav_right: tuple,
+    pose_std: float,
+    upright_std: float,
+    com_std: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Multiplicative goal score: contact pattern × upright(commanded lean) × leg pose ×
+    (alpha·CoM-over-support + (1-alpha)). A compromise state (lean without lifting,
+    lift without balance, flail on one foot) collapses on its weakest factor."""
+    c = flamingo_contact_pattern(env, command_name, sensor_name, asset_cfg=asset_cfg)
+    u = flamingo_upright(env, command_name, grav_right, upright_std, asset_cfg)
+    p = flamingo_pose(env, command_name, pose_right, pose_left, joint_indices, pose_std, asset_cfg)
+    alpha, _ = _flamingo_state(env, command_name)
+    com = flamingo_com_over_support(env, command_name, com_std, asset_cfg=asset_cfg)  # already × alpha
+    return c * u * p * (com + (1 - alpha))
+
+
+def flamingo_non_sole_contact(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+    """1 if any non-sole robot body touches the ground (cost, >= 0 → negative weight)."""
+    found = env.scene.sensors[sensor_name].data.found
+    if found.dim() == 3:
+        found = found.any(dim=-1)
+    return (found > 0).any(dim=1).float()
+
+
+def flamingo_hold_stillness(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    sensor_name: str,
+    ang_vel_std: float = 0.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Quiet trunk while HOLDING the COMMANDED state, free during the ramp:
+    (1 - 4·alpha·(1-alpha)) · contact_pattern · exp(-|ω_trunk|² / std²).
+    The contact-pattern factor matters: without it, standing still on two feet under a
+    one-foot command paid the full stillness (+0.66/step in the pre-training audit)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    alpha, _ = _flamingo_state(env, command_name)
+    hold = 1 - 4 * alpha * (1 - alpha)
+    pattern = flamingo_contact_pattern(env, command_name, sensor_name, asset_cfg=asset_cfg)
+    w = asset.data.root_link_ang_vel_b
+    return hold * pattern * torch.exp(-torch.sum(torch.square(w), dim=1) / ang_vel_std**2)
+
+
+def flamingo_spawn(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    prob: float,
+    pose_right: tuple,
+    pose_left: tuple,
+    trunk_z: float,
+    quat_right: tuple,
+    joint_noise_std: float = 0.01,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Reverse-curriculum reset: with probability ``prob`` an env starts ALREADY on one
+    foot (side 50/50) in the solved one-foot pose — support sole flat, random yaw —
+    so holding gets dense on-policy data before the (dynamic) lift-off is discovered.
+    The others keep the base reset (HOME, standing). Must run AFTER reset_base /
+    reset_robot_joints. The command term reads the spawn state on its first compute."""
+    if len(env_ids) == 0 or prob <= 0.0:
+        return
+    asset: Entity = env.scene[asset_cfg.name]
+    sel = env_ids[torch.rand(len(env_ids), device=env.device) < prob]
+    n = len(sel)
+    if n == 0:
+        return
+    right = torch.rand(n, device=env.device) < 0.5
+    qr = torch.tensor(quat_right, device=env.device).expand(n, 4).clone()
+    ql = qr.clone(); ql[:, 1] = -ql[:, 1]; ql[:, 3] = -ql[:, 3]      # L/R mirror: negate x, z
+    q_pose = torch.where(right.unsqueeze(-1), qr, ql)
+    yaw = torch.rand(n, device=env.device) * 2 * math.pi - math.pi
+    q_yaw = torch.stack([torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)], dim=1)
+    from mjlab.utils.lab_api.math import quat_mul
+    env.sim.data.qpos[sel, 2] = trunk_z + 0.002 + _env_origin_z(env, sel)
+    env.sim.data.qpos[sel, 3:7] = quat_mul(q_yaw, q_pose)
+    env.sim.data.qvel[sel] = 0.0
+    servo_ids = _servo_joint_ids(env, asset)
+    pr = torch.tensor(pose_right, device=env.device)
+    pl = torch.tensor(pose_left, device=env.device)
+    pose = torch.where(right.unsqueeze(-1), pr.expand(n, -1), pl.expand(n, -1))
+    pose = pose + torch.randn_like(pose) * joint_noise_std
+    cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
+    env.sim.data.qpos[sel.unsqueeze(1).long(), cols.unsqueeze(0)] = pose
