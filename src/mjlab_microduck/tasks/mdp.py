@@ -8079,3 +8079,18 @@ def flamingo_spawn(
     pose = pose + torch.randn_like(pose) * joint_noise_std
     cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
     env.sim.data.qpos[sel.unsqueeze(1).long(), cols.unsqueeze(0)] = pose
+
+
+def flamingo_head_range_cost(
+    env: ManagerBasedRlEnv,
+    caps: tuple,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Σ relu(|q - HOME| - cap) over the 4 neck/head servos (neck_pitch, head_pitch,
+    head_yaw, head_roll), servo indices 5-8. Cost (>= 0) → negative weight. Lets the head
+    act as a bounded counterweight; flamingo v2 twisted it 116° and jammed head_roll."""
+    asset: Entity = env.scene[asset_cfg.name]
+    q = _servo_joint_pos(env, asset)[:, 5:9]
+    home = _servo_default_joint_pos(env, asset)[:, 5:9]
+    c = torch.tensor(caps, device=env.device, dtype=q.dtype)
+    return torch.relu((q - home).abs() - c).sum(dim=1)

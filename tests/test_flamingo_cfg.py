@@ -57,25 +57,48 @@ def test_reward_signs(cfg):
                  "flamingo_upright", "flamingo_pose", "flamingo_stillness"):
         assert r[name].weight > 0, name
     # mjlab-style costs (>= 0) → negative weight
-    for name in ("non_sole_contact", "hip_hard_limits", "dof_pos_limits", "action_rate_l2",
-                 "self_collisions", "body_ang_vel", "angular_momentum"):
+    for name in ("non_sole_contact", "joint_limits", "action_over_limit", "servo_stall", "head_range",
+                 "dof_pos_limits", "action_rate_l2", "self_collisions", "body_ang_vel", "angular_momentum"):
         assert r[name].weight < 0, name
     # self-negating microduck penalty (returns -|a_z|) → POSITIVE weight
     assert r["gentle_motion"].weight > 0
 
 
-def test_hip_joints_exempt_from_soft_limits(cfg, model):
-    names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(model.njnt)]
+def test_limit_costs_cover_every_servo(cfg, model):
+    """v2 lesson: jammed joints were outside every limit term. Now the hard-stop band and the
+    soft-limit cost cover ALL servo joints (head included), passive joints excluded."""
     import re
-    pat = cfg.rewards["dof_pos_limits"].params["asset_cfg"].joint_names[0]
-    covered = [n for n in names if n and re.fullmatch(pat, n)]
-    assert not any("hip_roll" in n or "hip_yaw" in n for n in covered)
-    assert any("knee" in n for n in covered)
+    names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(model.njnt)]
+    servos = [n for n in names if n and not n.startswith("passive_") and "freejoint" not in n]
+    pat = cfg.rewards["joint_limits"].params["asset_cfg"].joint_names[0]
+    assert all(re.fullmatch(pat, n) for n in servos)
+    assert 0.04 <= cfg.rewards["joint_limits"].params["margin"] < 0.08   # target sits 0.08 from every stop
+    assert "asset_cfg" not in cfg.rewards["dof_pos_limits"].params or \
+        cfg.rewards["dof_pos_limits"].params["asset_cfg"].joint_names in ((".*",), None)
+
+
+def test_pose_respects_soft_limits_and_head_caps(model):
+    """The goal state must pay nothing in dof_pos_limits (0.9 soft) and head_range."""
+    from mjlab_microduck.robot.microduck_constants import HOME_FRAME
+    import re
+    for pose in (fl.POSE_RIGHT, fl.POSE_LEFT):
+        for j, v in zip(_JOINTS, pose):
+            lo, hi = model.jnt_range[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, j)]
+            mid, half = (lo + hi) / 2, (hi - lo) / 2
+            assert mid - 0.9 * half <= v <= mid + 0.9 * half, (j, v)
+        for k, cap in zip(range(5, 9), fl.HEAD_CAPS):
+            home = next(val for pat, val in HOME_FRAME.joint_pos.items() if re.search(pat, _JOINTS[k]))
+            assert abs(pose[k] - home) <= cap + 1e-3, (_JOINTS[k], pose[k], home, cap)
+
+
+def test_pushes_halved(cfg):
+    stages = cfg.curriculum["push_magnitude"].params["push_stages"]
+    assert max(abs(v) for st in stages for rng in st["velocity_range"].values() for v in rng) <= 0.15 + 1e-9
 
 
 @pytest.mark.parametrize("pose", [fl.POSE_RIGHT, fl.POSE_LEFT])
 def test_pose_clear_of_hard_stops(pose, model):
-    """The target itself must not sit in the hip_hard_limits band."""
+    """The target itself must not sit in the joint_limits band."""
     joints = ["left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
               "neck_pitch", "head_pitch", "head_yaw", "head_roll",
               "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle"]

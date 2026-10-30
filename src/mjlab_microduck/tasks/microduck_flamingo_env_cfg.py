@@ -19,8 +19,9 @@ Physics facts this cfg is built on (CPU MuJoCo + training BAM M6 actuator, 2026-
   - No ankle roll + hip-roll axis 24 mm inboard of the sole + sole half-width 17.8 mm
     ⇒ the CoM only enters a single sole with ≥ ~15° of trunk lean toward the support
     side (head used as counterweight) / ~16-20° with the head fixed. At 25° lean the
-    solved swan pose below keeps its CoM 14.8 mm inside the sole edge; the support
-    hip_roll then sits at its 0.9 soft limit (-0.345).
+    solved swan pose below keeps its CoM 10.6 mm inside the sole edge with every joint
+    >= 0.08 rad from its hard stop and the head bounded (14.8 mm when the hips and head
+    were allowed onto their stops — v2, which the policy then exploited by jamming them).
   - Static holding torques ≤ 0.27 N·m vs a 0.78-0.96 N·m budget, BUT the soft servos
     sag 0.3-0.5 rad under that load: the policy must command offsets (gravity
     feed-forward). Action scale 1.0 + wide ctrlrange allow it.
@@ -82,21 +83,23 @@ ONE_FOOT_PROB = 0.5           # P(resample commands one foot) — all four (star
 RAMP_S = 1.0                  # alpha 0 ↔ 1 slew time (reward reference only; obs = raw flag)
 
 # ── Solved one-foot pose (RIGHT foot down), servo order 0-4 L leg, 5-8 head, 9-13 R leg.
-# SWAN / attitude style (v2, 2026-10-29): the swing leg is lifted BACKWARD — thigh back,
-# knee folded (-1.33 rad), foot 66 mm behind the support foot along the trunk heading and
-# 118 mm off the floor (lowest sole point; site 153 mm). pose_solve.py with BEHIND=0.04,
-# MIN_LIFT=0.04, MAX_LIFT=0.12, MAX_TILT=25, hip_yaw + head free: support sole flat, CoM
-# 14.8 mm inside the sole edge, trunk lean 24.9°, no self-contact (swing leg 25 mm from
-# the support leg, 4.4 mm from the trunk), every hip joint ≥ 0.0386 rad from its hard
-# stop, head used as counterweight (head_yaw -1.48). LEFT = L/R mirror.
-# v1 lifted the leg FORWARD (foot 43 mm in front, margin 13.2 mm) — trained fine but was
-# not the intended motion. The hand-written probe controller holds v1 6/6 but this pose
-# only 1-2/6 with the same (stance-tuned) ankle gains: a pitch oscillation, the CoM stays
-# 9-13 mm inside the sole — a probe-gain issue, see the gain sweep in the physics notes.
+# SWAN / attitude style, v3 (2026-10-30): swing leg lifted BACKWARD (thigh back, knee
+# folded -1.25 rad), foot 73 mm behind the support foot along the trunk heading and 119 mm
+# off the floor (lowest sole point; site 155 mm). pose_solve.py with BEHIND=0.04,
+# MIN_LIFT=0.04, MAX_LIFT=0.12, MAX_TILT=25, STOP_MARGIN=0.08, HEAD_CAPS=neck_pitch:0.6,
+# head_pitch:0.6, head_yaw:0.5, head_roll:0.25: support sole flat, CoM 10.6 mm inside the
+# sole edge, trunk lean 24.6°, no self-contact, EVERY joint >= 0.080 rad from its hard
+# stop, head only a bounded counterweight (yaw -0.50, roll -0.20 from HOME). LEFT = mirror.
+# History: v1 lifted the leg FORWARD; v2 (backward, head free, hips 0.0386 rad from the
+# stops) trained to 32/32 hold / lift-off / put-down in sim, but its policy jammed five
+# joints into their hard stops with commands far past them (head_roll +7.05 rad commanded
+# vs a 0.44 limit, support hip_yaw +3.38, hip_roll -2.34) and twisted the head 116° as a
+# counterweight — a stalled-servo trick that would not survive the real robot. v3 moves
+# the target off the stops and bounds the head; the costs below price the jam itself.
 POSE_RIGHT = (
-    -0.1217, 0.3431, 0.6277, -1.3316, 0.5811,      # left leg (swing)
-    0.6771, 0.0556, -1.4792, -0.374,               # neck_pitch, head_pitch, head_yaw, head_roll
-    0.3872, -0.3454, 0.5814, 0.7742, 0.2404,       # right leg (support)
+    -0.1731, 0.2983, 0.5275, -1.2462, 0.4609,      # left leg (swing)
+    0.776, -0.1638, -0.4994, -0.197,               # neck_pitch, head_pitch, head_yaw, head_roll
+    0.3563, -0.3032, 0.7664, 0.7285, 0.1442,       # right leg (support)
 )
 
 
@@ -109,20 +112,29 @@ def mirror_pose(p):
 
 POSE_LEFT = mirror_pose(POSE_RIGHT)
 # Trunk state of POSE_RIGHT with the support sole flat on the floor (harness.place_on_floor).
-POSE_TRUNK_Z = 0.12647
-POSE_QUAT_RIGHT = (0.95876, 0.21511, -0.01812, 0.18487)
-GRAV_B_RIGHT = (-0.1143, -0.4058, -0.9068)     # projected gravity, body frame, at POSE_RIGHT
+POSE_TRUNK_Z = 0.12903
+POSE_QUAT_RIGHT = (0.96321, 0.20615, 0.05476, 0.16348)
+GRAV_B_RIGHT = (0.0381, -0.415, -0.909)        # projected gravity, body frame, at POSE_RIGHT
 
 _LEG_JOINTS = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
 
 # ── Reward constants ──────────────────────────────────────────────────────────
-SWING_LIFT_TARGET = 0.08      # m, foot-site height (pose: 0.153 site / 0.118 lowest sole point)
-SWING_BEHIND_TARGET = 0.05    # m, swing foot behind the support foot along the trunk heading (pose: 0.066)
+SWING_LIFT_TARGET = 0.08      # m, foot-site height (pose: 0.155 site / 0.119 lowest sole point)
+SWING_BEHIND_TARGET = 0.05    # m, swing foot behind the support foot along the trunk heading (pose: 0.073)
 COM_STD = 0.015               # m — ≈ the sole half-width: the margin that decides holds
 UPRIGHT_STD = 0.25            # |Δg| ≈ 14° — wide enough that the current policy scores
 POSE_STD = 0.5                # rad, legs (HOME → pose deltas up to ~0.96 rad)
 FALL_TILT_DEG = 50.0          # termination (target lean 25°)
-LIMIT_MARGIN = 0.03           # rad from the HARD stop for hip_roll / hip_yaw
+LIMIT_MARGIN = 0.05           # rad from the HARD stop, ALL servo joints (v2: 0.03, hips only). The target
+                              # sits 0.08 from every stop: 0.03 slack for the support hips, which sag
+                              # ~0.055 rad under body weight before the policy compensates (audit).
+# Head excursion caps around HOME (rad): neck_pitch, head_pitch, head_yaw, head_roll. The head
+# may act as a counterweight, but bounded (v2 twisted it 116° and jammed head_roll).
+HEAD_CAPS = (0.6, 0.6, 0.5, 0.25)
+# Pushes: final ±0.15 m/s (sitstand's ±0.3 = 2× here). A single-leg stance has ~1 cm of CoM
+# margin; v2's curves dropped exactly as the inherited ramp reached ±0.3 (composite 2.42 @1500
+# → 1.70 @3000, falls 2.6 → 6.8), and nothing pushes a flamingo hard at deployment.
+PUSH_SCALE = 0.5
 
 # Spawn curriculum: many starts already on one foot while holding is learned, then more
 # HOME starts so lift-off gets the data (phase-align: don't harden before it consolidates).
@@ -211,8 +223,8 @@ def make_microduck_flamingo_env_cfg(play: bool = False, rough: bool = False) -> 
         func=microduck_mdp.flamingo_hold_stillness, weight=1.0,
         params={**common, "sensor_name": feet, "ang_vel_std": 0.5},
     )
-    # Head: commandable but LIGHT — it is 38 % of the mass and the best counterweight
-    # (≈ +5 mm margin); the head command keeps sitstand's stage-0 alive ranges only.
+    # Head: commandable but LIGHT — it is 38 % of the mass and a useful counterweight;
+    # the head command keeps sitstand's stage-0 alive ranges only. Bounded by head_range.
     cfg.rewards["head_pose_tracking"].weight = 0.3
 
     # ── Costs ─────────────────────────────────────────────────────────────────
@@ -220,18 +232,42 @@ def make_microduck_flamingo_env_cfg(play: bool = False, rough: bool = False) -> 
         func=microduck_mdp.flamingo_non_sole_contact, weight=-2.0,
         params={"sensor_name": body_ground_cfg.name},
     )
-    # The one-foot pose needs hip_roll / hip_yaw AT the 0.9 soft limit: exempt them from
-    # the soft-limit cost and guard the HARD stops instead.
-    cfg.rewards["dof_pos_limits"].params["asset_cfg"] = SceneEntityCfg(
-        "robot", joint_names=(r"^(?!passive_|.*hip_roll|.*hip_yaw).*",))
-    cfg.rewards["hip_hard_limits"] = RewardTermCfg(
+    # Anti-jam stack (v2 lesson: five joints parked on their hard stops, commanded up to
+    # 6.6 rad past them). All three are mjlab-style costs (>= 0) → NEGATIVE weights.
+    #  - joint_limits: qpos within LIMIT_MARGIN of a HARD stop, every servo joint (the v3
+    #    target keeps >= 0.08 rad from every stop; band 0.05 leaves slack for load sag).
+    #  - action_over_limit: COMMANDED target past (stop + 0.3 rad) — the over-drive that
+    #    turns a soft servo into a max-torque clamp. Same term/weight as the rollers env.
+    #  - servo_stall: |torque| > 0.4 N·m at |vel| < 0.5 rad/s (velstand's term and weight).
+    #    Holding the v3 pose needs <= 0.16 N·m statically, so a clean stance is free.
+    cfg.rewards["joint_limits"] = RewardTermCfg(
         func=microduck_mdp.joint_pos_limit_proximity, weight=-5.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(r".*hip_roll", r".*hip_yaw")),
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=(r"^(?!passive_).*",)),
                 "margin": LIMIT_MARGIN},
+    )
+    cfg.rewards["action_over_limit"] = RewardTermCfg(
+        func=microduck_mdp.action_over_limit_penalty, weight=-0.5,
+        params={"action_name": "joint_pos", "overshoot": 0.3},
+    )
+    cfg.rewards["servo_stall"] = RewardTermCfg(
+        func=microduck_mdp.servo_stall_penalty, weight=-0.05,
+        params={"torque_thresh": 0.4, "vel_thresh": 0.5},
+    )
+    cfg.rewards["head_range"] = RewardTermCfg(
+        func=microduck_mdp.flamingo_head_range_cost, weight=-5.0,
+        params={"caps": HEAD_CAPS},
     )
     # Kept from sitstand (sim2real parity): action_rate_l2 (+ its -0.1 → -1.0 ramp),
     # joint_torque_rate_l2 (+ ramp), gentle_motion |a_z| (POSITIVE weight, self-negating),
     # body_ang_vel, angular_momentum, self_collisions, head_pose_tracking.
+
+    # ── Pushes: halve the inherited sitstand ramp (see PUSH_SCALE) ───────────────
+    if "push_magnitude" in cfg.curriculum:
+        for st in cfg.curriculum["push_magnitude"].params["push_stages"]:
+            st["velocity_range"] = {k: (lo * PUSH_SCALE, hi * PUSH_SCALE) for k, (lo, hi) in st["velocity_range"].items()}
+    if "push_robot" in cfg.events:
+        vr = cfg.events["push_robot"].params["velocity_range"]
+        cfg.events["push_robot"].params["velocity_range"] = {k: (lo * PUSH_SCALE, hi * PUSH_SCALE) for k, (lo, hi) in vr.items()}
 
     # ── Terminations ──────────────────────────────────────────────────────────
     cfg.terminations["fell_over"] = TerminationTermCfg(
