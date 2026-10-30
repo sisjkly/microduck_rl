@@ -53,7 +53,7 @@ def test_sit_stack_removed(cfg):
 
 def test_reward_signs(cfg):
     r = cfg.rewards
-    for name in ("flamingo_composite", "flamingo_contact", "flamingo_swing_lift", "flamingo_swing_behind", "flamingo_com",
+    for name in ("flamingo_composite", "flamingo_contact", "flamingo_swing_lift", "flamingo_swing_behind", "flamingo_height", "flamingo_com",
                  "flamingo_upright", "flamingo_pose", "flamingo_stillness"):
         assert r[name].weight > 0, name
     # mjlab-style costs (>= 0) → negative weight
