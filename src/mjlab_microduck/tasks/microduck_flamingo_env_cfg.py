@@ -42,8 +42,9 @@ Reward design (AGENTS.md rules applied):
   - Multiplicative composite (contact × upright × pose × CoM): a lean-without-lift or
     lift-without-balance compromise collapses on its weakest factor.
   - Contact pattern is binary and gated on not being toppled; the swing-lift and
-    swing-behind terms only pay while the support sole is down → hopping and lying both
-    lose. swing-behind fixes the lift DIRECTION (backward, swan style).
+    swing-behind terms only pay while the support sole is down AND the swing sole is off
+    the floor → hopping, lying and the toe-planted kickstand (v3) all lose. swing-behind
+    fixes the lift DIRECTION (backward, swan style); trunk height prices a crouch.
   - Every non-sole ground contact costs; falls terminate past 50° (target lean 25°).
   - Positive task mass ≈ sitstand's, so its sim2real regularisers keep their RELATIVE
     strength. Penalty signs: mjlab costs (≥ 0) negative weight; self-negating
@@ -135,6 +136,13 @@ HEAD_CAPS = (0.6, 0.6, 0.5, 0.25)
 # margin; v2's curves dropped exactly as the inherited ramp reached ±0.3 (composite 2.42 @1500
 # → 1.70 @3000, falls 2.6 → 6.8), and nothing pushes a flamingo hard at deployment.
 PUSH_SCALE = 0.5
+# Trunk height targets (m above the env origin), MEASURED with the v2 policy in sim:
+# two feet 116.3 mm, one foot 117.1 mm; the v3 target pose sits at 129 mm with a straighter
+# support leg. z_one = 122 mm between them, std 20 mm: both score >= 0.88, the v3 kickstand
+# crouch (94 mm) scores 0.14.
+TRUNK_Z_TWO = 0.116
+TRUNK_Z_ONE = 0.122
+TRUNK_Z_STD = 0.02
 
 # Spawn curriculum: many starts already on one foot while holding is learned, then more
 # HOME starts so lift-off gets the data (phase-align: don't harden before it consolidates).
@@ -218,6 +226,10 @@ def make_microduck_flamingo_env_cfg(play: bool = False, rough: bool = False) -> 
         func=microduck_mdp.flamingo_pose, weight=1.0,
         params={**common, "pose_right": POSE_RIGHT, "pose_left": POSE_LEFT,
                 "joint_indices": _LEG_JOINTS, "std": POSE_STD},
+    )
+    cfg.rewards["flamingo_height"] = RewardTermCfg(
+        func=microduck_mdp.flamingo_trunk_height, weight=1.0,
+        params={**common, "z_two": TRUNK_Z_TWO, "z_one": TRUNK_Z_ONE, "std": TRUNK_Z_STD},
     )
     cfg.rewards["flamingo_stillness"] = RewardTermCfg(
         func=microduck_mdp.flamingo_hold_stillness, weight=1.0,

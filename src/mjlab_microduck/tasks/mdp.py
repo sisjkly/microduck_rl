@@ -7860,7 +7860,9 @@ def flamingo_swing_lift(
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """alpha · clamp(swing-foot height / target, 0, 1), only while the SUPPORT sole is
-    down and the trunk is up — a 1 mm hover pays ~nothing, lying down pays nothing."""
+    down, the SWING sole is NOT, and the trunk is up — a 1 mm hover pays ~nothing, lying
+    down pays nothing, and a foot planted on its toe (site 30 mm up, sole edge on the
+    floor: flamingo v3's kickstand) pays nothing either."""
     asset: Entity = env.scene[asset_cfg.name]
     alpha, side = _flamingo_state(env, command_name)
     h = _flamingo_foot_heights(env, asset)
@@ -7868,8 +7870,9 @@ def flamingo_swing_lift(
     h_sw = torch.where(sup_right, h[:, 0], h[:, 1])
     f = _flamingo_feet_found(env, sensor_name)
     sup_down = torch.where(sup_right, f[:, 1], f[:, 0]).float()
+    sw_up = 1.0 - torch.where(sup_right, f[:, 0], f[:, 1]).float()
     frac = torch.clamp(h_sw / target_height, 0.0, 1.0)
-    return alpha * frac * sup_down * _flamingo_upright_gate(env, asset, gate_tilt_deg)
+    return alpha * frac * sup_down * sw_up * _flamingo_upright_gate(env, asset, gate_tilt_deg)
 
 
 def flamingo_swing_behind_dist(env: ManagerBasedRlEnv, command_name: str, asset: Entity) -> torch.Tensor:
@@ -7897,14 +7900,18 @@ def flamingo_swing_behind(
     """alpha · clamp(behind / target, 0, 1): the swing leg is lifted BACKWARD (swan /
     attitude style), measured along the trunk heading. Same gates as swing_lift (support
     sole down, trunk up). The leg-pose Gaussian alone (std 0.5 rad over 10 joints) is too
-    loose to pin the lift direction — the first run lifted the leg in FRONT (-43 mm)."""
+    loose to pin the lift direction — the first run lifted the leg in FRONT (-43 mm).
+    Paid only while the swing sole is OFF the floor: v3 (ungated) learned a kickstand — the
+    swing foot planted on its toe behind the robot, support knee crouched — that took this
+    term at full value (+1.50/step) with zero single-support time."""
     asset: Entity = env.scene[asset_cfg.name]
     alpha, side = _flamingo_state(env, command_name)
     behind = flamingo_swing_behind_dist(env, command_name, asset)
     f = _flamingo_feet_found(env, sensor_name)
     sup_down = torch.where(side > 0, f[:, 1], f[:, 0]).float()
+    sw_up = 1.0 - torch.where(side > 0, f[:, 0], f[:, 1]).float()
     frac = torch.clamp(behind / target_dist, 0.0, 1.0)
-    return alpha * frac * sup_down * _flamingo_upright_gate(env, asset, gate_tilt_deg)
+    return alpha * frac * sup_down * sw_up * _flamingo_upright_gate(env, asset, gate_tilt_deg)
 
 
 def flamingo_whole_body_com(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
@@ -8094,3 +8101,21 @@ def flamingo_head_range_cost(
     home = _servo_default_joint_pos(env, asset)[:, 5:9]
     c = torch.tensor(caps, device=env.device, dtype=q.dtype)
     return torch.relu((q - home).abs() - c).sum(dim=1)
+
+
+def flamingo_trunk_height(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    z_two: float,
+    z_one: float,
+    std: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """exp(-(z - z_target)² / std²), z_target = (1-alpha)·z_two + alpha·z_one (trunk height
+    above the env origin). Prices the crouched support leg of the v3 kickstand (94 mm vs
+    116-122 mm standing)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    alpha, _ = _flamingo_state(env, command_name)
+    z = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
+    zt = (1 - alpha) * z_two + alpha * z_one
+    return torch.exp(-torch.square(torch.nan_to_num(z, nan=0.0) - zt) / std**2)
