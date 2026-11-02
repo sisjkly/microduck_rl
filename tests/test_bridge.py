@@ -77,6 +77,7 @@ class FakeBridge:
         self.speed_limit = 0
         self.alive = True
         self.mute = False            # an ESP32 that stopped answering (rebooting, USB gone)
+        self.drop_sync_reads = 0     # the next N SYNC READs lose two replies on the USB link
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
 
@@ -158,8 +159,12 @@ class FakeBridge:
                     self._status(id_, 0x04 if d is None else 0, d or b"")
                 elif ins == B.INS_SYNC_READ:
                     addr, n = struct.unpack_from("<HH", p)
+                    drop = set()
+                    if self.drop_sync_reads:
+                        self.drop_sync_reads -= 1
+                        drop = set(list(p[4:])[5:7])               # as seen on the robot: 13 of 15
                     for i in p[4:]:
-                        if i in self.raw:
+                        if i in self.raw and i not in drop:
                             self._status(i, 0, self._reg(i, addr, n))
                 elif ins == B.INS_SYNC_WRITE:
                     addr, width = struct.unpack_from("<HH", p)
@@ -645,3 +650,33 @@ def test_regs_dump_flags_native_d_and_torque_limit():
         b.close()
         fake.alive = False
     assert "RAM D!=0" not in idle[0]
+
+
+def test_a_lost_sync_read_reply_costs_a_quick_retry_not_a_missed_tick():
+    """Probe 2026-11-02: ~4 losses a minute, 1-9 of 15 replies missing for good. Before: 30 ms
+    timeout + 120 ms settle + retry = ~165 ms stall. Now: 15 ms + 4 ms + retry."""
+    master, slave = pty.openpty()
+    fake = FakeBridge(master)
+    io = B.BridgeIO(os.ttyname(slave), _calibrated(), StaticImu(), control_dt=0.002)
+    try:
+        io.read()
+        fake.drop_sync_reads = 1
+        t0 = time.monotonic()
+        s = io.read()
+        dt = time.monotonic() - t0
+        assert io.link_retries == 1 and len(s.positions) == 15
+        assert dt < 0.06, dt
+        fake.drop_sync_reads = 2                          # two in a row: still answered
+        io.read()
+        assert io.link_retries == 3
+        fake.drop_sync_reads = 3                          # three in a row: the link is lost
+        with pytest.raises(B.BridgeError):
+            io.read()
+    finally:
+        fake.alive = False
+        io.close()
+
+
+def test_native_reads_keep_the_long_wait():
+    assert B.Bridge._timing(B.NATIVE_BASE + 50, 0.25) == (0.25, B.NATIVE_SETTLE_S)
+    assert B.Bridge._timing(B.ADDR_DIAG, None) == (B.CACHE_TIMEOUT_S, B.CACHE_SETTLE_S)

@@ -193,6 +193,17 @@ class Port:
         os.close(self.fd)
 
 
+# Replies from the bridge's cache (status, per-joint diagnostics: every virtual address below
+# NATIVE_BASE) come back whole within ~6 ms or not at all (probe 2026-11-02, 9000 SYNC READs:
+# p99.9 6.9 ms, max 8 ms; ~4 losses a minute, 1-9 of 15 replies missing, none arriving later,
+# usb_short 0 -> lost on the USB link, burst size irrelevant). So a cache read waits 15 ms and
+# a loss costs a few ms of retry instead of the 30 ms timeout + 120 ms settle that native reads
+# need (the bridge's USB loop blocks up to 100 ms on those, so their replies can land late).
+CACHE_TIMEOUT_S = 0.015
+CACHE_SETTLE_S = 0.004
+NATIVE_SETTLE_S = 0.12
+
+
 class Bridge:
     def __init__(self, path: str, timeout_s: float = 0.03):
         self.port = Port(path)
@@ -202,7 +213,8 @@ class Bridge:
     def close(self):
         self.port.close()
 
-    def _transact(self, pkt: bytes, expect: list[int], timeout_s: float | None = None) -> dict[int, tuple[int, bytes]]:
+    def _transact(self, pkt: bytes, expect: list[int], timeout_s: float | None = None,
+                  settle_s: float = NATIVE_SETTLE_S) -> dict[int, tuple[int, bytes]]:
         self.port.drain()
         self.parser.buf = b""
         self.port.write(pkt)
@@ -214,8 +226,8 @@ class Bridge:
                 missing = [i for i in expect if i not in got]
                 # The bridge may still answer late (a native register read blocks its USB loop
                 # for up to 100 ms): let that land and throw it away, so the next request
-                # cannot take a stale reply for its own.
-                time.sleep(0.12)
+                # cannot take a stale reply for its own. Cache reads never answer late.
+                time.sleep(settle_s)
                 self.port.drain()
                 raise BridgeError(f"no reply from virtual ID(s) {missing}")
             for id_, err, params in self.parser.feed(self.port.read_some(left)):
@@ -234,15 +246,23 @@ class Bridge:
         """The virtual IDs this firmware answers (PING): 1-14, or 1-15 with the mouth patch."""
         return [i for i in BRIDGE_IDS if self.ping(i)]
 
+    @staticmethod
+    def _timing(addr: int, timeout_s: float | None) -> tuple[float | None, float]:
+        if addr >= NATIVE_BASE:
+            return timeout_s, NATIVE_SETTLE_S
+        return (timeout_s or CACHE_TIMEOUT_S), CACHE_SETTLE_S
+
     def read(self, id_: int, addr: int, n: int, timeout_s: float | None = None) -> bytes:
-        err, data = self._transact(packet(id_, INS_READ, struct.pack("<HH", addr, n)), [id_], timeout_s)[id_]
+        t, settle = self._timing(addr, timeout_s)
+        err, data = self._transact(packet(id_, INS_READ, struct.pack("<HH", addr, n)), [id_], t, settle)[id_]
         if err or len(data) != n:
             raise BridgeError(f"read ID {id_} @{addr}x{n}: error 0x{err:02x}, {len(data)} B")
         return data
 
     def sync_read(self, addr: int, n: int, ids) -> dict[int, bytes]:
         ids = list(ids)
-        got = self._transact(packet(0xFE, INS_SYNC_READ, struct.pack("<HH", addr, n) + bytes(ids)), ids)
+        t, settle = self._timing(addr, None)
+        got = self._transact(packet(0xFE, INS_SYNC_READ, struct.pack("<HH", addr, n) + bytes(ids)), ids, t, settle)
         out = {}
         for i, (err, data) in got.items():
             if err or len(data) != n:
@@ -357,11 +377,17 @@ class BridgeIO(RobotIO):
         return self.bridge.status()
 
     def read(self) -> Sensors:
-        try:
-            raw = self.bridge.sync_read(ADDR_DIAG, 32, self.ids)
-        except BridgeError:
-            self.link_retries += 1           # one lost reply: ask again before giving up
-            raw = self.bridge.sync_read(ADDR_DIAG, 32, self.ids)
+        # A lost reply costs ~20 ms (15 ms wait + retry), not a missed tick of 165 ms; two
+        # retries before the link counts as lost (two losses in a row: never seen in 13500 reads).
+        raw = None
+        for attempt in range(3):
+            try:
+                raw = self.bridge.sync_read(ADDR_DIAG, 32, self.ids)
+                break
+            except BridgeError:
+                if attempt == 2:
+                    raise
+                self.link_retries += 1
         diag = {i: parse_diag(d) for i, d in raw.items()}
         self.diag = diag
         pos, vel = np.zeros(NUM_JOINTS), np.zeros(NUM_JOINTS)
