@@ -53,6 +53,7 @@ class TickLog:
     mode: str = ""                       # network driving in RUN: walk / sit / rise / <skill>
     voltages: np.ndarray | None = None   # V per servo (bridge): sag under load slows big moves
     on_fall: str = ""                    # limp / keep / getup at this tick (the dashboard can switch it)
+    temperatures: np.ndarray | None = None   # °C per servo (bridge, register 63)
 
 
 # Ground pick beak, scripted on the training phases (microduck_ground_pick_env_cfg.py:
@@ -395,7 +396,9 @@ class Runner:
                                     None if cur is None else np.array(cur, dtype=float),
                                     self.mode if self.state is State.RUN else "",
                                     None if getattr(self.io, "voltages", None) is None
-                                    else np.array(self.io.voltages, dtype=float), self.on_fall))
+                                    else np.array(self.io.voltages, dtype=float), self.on_fall,
+                                    None if getattr(self.io, "temperatures", None) is None
+                                    else np.array(self.io.temperatures, dtype=float)))
         self.io.wait_tick()
         return s
 

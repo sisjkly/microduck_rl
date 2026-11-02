@@ -234,6 +234,16 @@ duck duck_runtime.dashboard --calib calib.json --set policies --set policies_hd1
 - 文件在 `--media-dir`（默认 `media/`），面板“照片和视频”里下载。画面和文件都要 token（拍到的是房间）。
 - 键：`v` 开关实时画面，`f` 拍照。
 
+### 7. 温度
+
+- **舵机最高温**（顶栏）：每个舵机自己报的温度（Feetech 寄存器 63，经 ESP32 桥的诊断包），取 14 个的最大值，
+  不含嘴巴；关节表里有每个舵机的。55 °C 黄、65 °C 红。
+- **树莓派**（顶栏）：SoC 温度（`/sys/class/thermal/thermal_zone0/temp`，每秒读一次），鼠标悬停看 CPU 频率和
+  `vcgencmd get_throttled`（每 5 s 读一次）。70 °C 黄、80 °C 红；**欠压 / 降频正在发生时直接标红并写进事件日志**
+  ——树莓派和舵机共用电池，电压一掉 CPU 会降频，50 Hz 控制循环就会受影响。`--no-board` 关掉。
+- 录制（.npz）里：`temperatures`（每 tick，15 个舵机 °C）；`board_t` / `board_temp_c` / `board_freq_mhz` /
+  `board_throttled`（1 Hz，`board_t` 和 `t` 同一时钟，读不到为 NaN / -1）；`meta` 里有保存时的 `board_at_save`。
+
 ## 先在电脑上预演
 
 在电脑上（不是鸭子上）：`git clone -b ours-813g-hd1910 https://github.com/sisjkly/microduck_rl.git && cd microduck_rl && uv sync`

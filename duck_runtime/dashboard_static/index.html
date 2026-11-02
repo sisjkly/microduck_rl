@@ -120,7 +120,8 @@ button.b.recording { background: var(--bad); border-color: var(--bad); color: #f
   <span class="chip"><span class="dot" id="stateDot"></span><b id="state">—</b></span>
   <span class="chip">电池 <b id="hdrV">—</b></span>
   <span class="chip">电流 <b id="hdrI">—</b></span>
-  <span class="chip">最高温 <b id="hdrT">—</b></span>
+  <span class="chip" title="舵机自身温度（寄存器 63）的最高值，不含嘴巴">舵机最高温 <b id="hdrT">—</b></span>
+  <span class="chip" id="boardChip" title="树莓派 SoC 温度">树莓派 <b id="hdrBoard">—</b></span>
   <span class="chip">控制 <b id="hdrHz">—</b></span>
   <span class="chip">摔倒 <b id="hdrFalls">0</b></span>
   <button class="estop" id="estop" title="卸力（键 0）">卸力 0</button>
@@ -543,6 +544,16 @@ function render(f) {
   const temps = f.joints.temp ? f.joints.temp.filter((v, i) => v != null && v > 0 && i !== 9) : [];
   const tmax = temps.length ? Math.max(...temps) : null;
   $("hdrT").textContent = tmax == null ? "—" : `${tmax} °C`; $("hdrT").className = cls(tmax, 55, 65);
+  const b = f.board;
+  $("boardChip").style.display = b ? "" : "none";
+  if (b) {
+    const now = b.now || [], ever = b.ever || [];
+    $("hdrBoard").textContent = (b.temp_c == null ? "—" : `${fmt(b.temp_c, 0)} °C`) + (now.length ? " · " + now.join("/") : "");
+    $("hdrBoard").className = now.length ? "x" : cls(b.temp_c, 70, 80);
+    $("boardChip").title = `树莓派 SoC 温度 ${b.temp_c ?? "—"} °C，CPU ${b.freq_mhz ?? "—"} MHz` +
+      (b.throttled == null ? "" : `\nget_throttled ${b.throttled}`) +
+      (ever.length ? `\n开机以来出现过：${ever.join("、")}` : "");
+  }
   $("hdrHz").textContent = f.loop.hz == null ? "—" : `${fmt(f.loop.hz, 0)} Hz`; $("hdrHz").className = f.loop.hz && f.loop.hz < 45 ? "w" : "";
   $("hdrFalls").textContent = f.limped ? `${f.falls}（卸力 ${f.limped}）` : f.falls;
   if (f.refusal) $("refusal").textContent = f.refusal;

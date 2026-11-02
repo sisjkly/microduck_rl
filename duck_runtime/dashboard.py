@@ -14,6 +14,11 @@ Camera (when rpicam-vid exists, --camera off to disable): live MJPEG at /camera/
 photos and .mov recordings in --media-dir (see camera.py). The camera only runs while the
 live view is on or a recording is going.
 
+Pi board (board.py, --no-board to disable): SoC temperature, CPU clock and the firmware's
+under-voltage / throttle flags, shown in the header and saved at 1 Hz in recordings
+(board_t / board_temp_c / board_freq_mhz / board_throttled; servo temperatures are the
+per-tick ``temperatures`` array).
+
 Telemetry: Server-Sent Events at 10 Hz (/api/stream). Controls: JSON POSTs that need the
 session token printed at startup (the page keeps it after the first visit). Motion commands
 time out like the terminal driver's: no fresh command for 0.5 s -> zero twist (the page sends
@@ -88,9 +93,13 @@ class Dashboard:
     """Owns the control loop (call ``run`` on the main thread); HTTP threads only queue work."""
 
     def __init__(self, runner, io, bank, head, *, backend: str, log_dir: str,
-                 token: str | None, realtime: bool, calib_path: str | None = None, camera=None):
+                 token: str | None, realtime: bool, calib_path: str | None = None, camera=None, board=None):
         self.runner, self.io, self.bank = runner, io, bank
         self.camera = camera
+        self.board = board                       # BoardMonitor: the Pi's own temperature / throttling
+        self.board_rec: list | None = None       # 1 Hz board samples while recording
+        self._board_next = 0.0
+        self._board_now: tuple = ()
         self.head_offset = head
         self.backend = backend
         self.realtime = realtime
@@ -248,6 +257,7 @@ class Dashboard:
         def apply():
             if on and self.recording is None:
                 self.recording = []
+                self.board_rec = []
                 self.runner.log = self.recording
                 self.rec_started = time.time()
                 self.log_event("info", "recording started")
@@ -257,7 +267,7 @@ class Dashboard:
                 log, self.recording, self.runner.log = self.recording, None, None
                 name = time.strftime("dash_%Y%m%d-%H%M%S.npz")
                 if log:
-                    save_log(str(self.log_dir / name), log, self.log_meta())
+                    save_log(str(self.log_dir / name), log, self.log_meta(), self.board_arrays())
                     self.log_event("info", f"recording saved: {name} ({len(log)} ticks)")
                 return {"ok": True, "file": name if log else None}
             return {"ok": True}
@@ -292,7 +302,34 @@ class Dashboard:
         a = self.bank.active
         return {"version": self.version, "backend": self.backend, "set": a.label if a else None,
                 "walk": a.pset.walk_file if a else None, "on_fall_at_save": self.runner.on_fall,
-                "getup_timeout_s": self.runner.getup_timeout_s, "calib": self.calib_path}
+                "getup_timeout_s": self.runner.getup_timeout_s, "calib": self.calib_path,
+                "board_at_save": None if self.board is None else self.board.status()}
+
+    def board_arrays(self) -> dict:
+        """The recording's board samples as npz arrays (board_t is on the same clock as t), and
+        clears them. Empty when there is no monitor."""
+        rec, self.board_rec = self.board_rec or [], None
+        if not rec:
+            return {}
+        nan = float("nan")
+        return {"board_t": np.array([r[0] for r in rec]),
+                "board_temp_c": np.array([nan if r[1] is None else r[1] for r in rec]),
+                "board_freq_mhz": np.array([nan if r[2] is None else r[2] for r in rec]),
+                "board_throttled": np.array([-1 if r[3] is None else r[3] for r in rec], dtype=np.int64)}
+
+    def _sample_board(self) -> None:
+        """Once a second on the control thread: just reads the monitor's last values."""
+        b = self.board
+        if self.board_rec is not None:
+            self.board_rec.append((self.io.now(), b.temp_c, b.freq_mhz, b.throttled))
+        st = b.status()
+        now = tuple(st["now"])
+        if now != self._board_now:
+            if now:
+                self.log_event("warn", f"树莓派: {'、'.join(now)} (get_throttled {st['throttled']})")
+            elif self._board_now:
+                self.log_event("info", "树莓派: 欠压/降频已解除")
+            self._board_now = now
 
     def list_logs(self) -> list[dict]:
         out = []
@@ -338,6 +375,7 @@ class Dashboard:
                        {"size": list(self.camera.size), "fps": self.camera.fps,
                         "still": list(self.camera.still_size),
                         "tuning": self.camera.status()["tuning"]}),
+            "board": self.board is not None,
         }
 
     def log_event(self, level: str, message: str) -> None:
@@ -423,6 +461,7 @@ class Dashboard:
                            "ticks": len(self.recording)} if self.recording is not None else {"on": False}),
             "clients": self.clients,
             "camera": None if self.camera is None else self.camera.status(),
+            "board": None if self.board is None else self.board.status(),
             "events_seq": self.event_seq,
         }
 
@@ -452,6 +491,9 @@ class Dashboard:
                 self.overruns += 1
             self.tick_times.append(now)
             self._track_events()
+            if self.board is not None and now >= self._board_next:
+                self._board_next = now + 1.0
+                self._sample_board()
             if now >= next_frame:
                 next_frame = now + 1.0 / FRAME_HZ
                 frame = self._build_frame()
@@ -678,6 +720,8 @@ def main(argv=None):
                          "sensor's stock tuning; or a tuning-file path")
     ap.add_argument("--camera-args", default="", help="extra rpicam options, e.g. \"--rotation 180\"")
     ap.add_argument("--media-dir", default="media", help="where photos and videos are written")
+    ap.add_argument("--no-board", action="store_true",
+                    help="don't read the Pi's temperature / throttle flags (vcgencmd)")
     args = ap.parse_args(argv)
 
     runner, io, bank, head = build_runner(args, ap)
@@ -693,14 +737,20 @@ def main(argv=None):
             camera = Camera(args.media_dir, size=(w, h), fps=args.camera_fps,
                             tuning=None if args.camera_tuning == "default" else args.camera_tuning,
                             extra_args=args.camera_args)
+    board = None
+    if not args.no_board:
+        from .board import BoardMonitor
+        board = BoardMonitor().start()
     dash = Dashboard(runner, io, bank, head, backend=args.backend, log_dir=args.log_dir,
-                     token=token, realtime=args.backend == "sim", calib_path=args.calib, camera=camera)
+                     token=token, realtime=args.backend == "sim", calib_path=args.calib, camera=camera,
+                     board=board)
     if args.backend == "sim":
         runner.enable()                       # nobody is holding a simulated duck
     server = DashboardServer((args.host, args.http_port), make_handler(dash))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"code {dash.version}, on fall: {runner.on_fall}, camera: "
-          + (f"{camera.size[0]}x{camera.size[1]}@{camera.fps} ({camera.status()['tuning']})" if camera else "none"))
+          + (f"{camera.size[0]}x{camera.size[1]}@{camera.fps} ({camera.status()['tuning']})" if camera else "none")
+          + (f", Pi board: {board.temp_c} °C" if board is not None and board.temp_c is not None else ""))
     print("dashboard:", "  ".join(_urls(args.http_port, token)))
     print("Ctrl+C here: torque off and exit")
     import signal
@@ -727,8 +777,10 @@ def main(argv=None):
         if dash.recording:
             from .run import save_log
             name = time.strftime("dash_%Y%m%d-%H%M%S.npz")
-            save_log(str(dash.log_dir / name), dash.recording, dash.log_meta())
+            save_log(str(dash.log_dir / name), dash.recording, dash.log_meta(), dash.board_arrays())
             print(f"\nrecording -> {dash.log_dir / name}")
+        if board is not None:
+            board.stop()
         io.close()
         server.shutdown()
 

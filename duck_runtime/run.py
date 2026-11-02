@@ -242,10 +242,13 @@ def build_runner(args, ap: argparse.ArgumentParser):
     return runner, io, bank, head
 
 
-def save_log(path: str, log: list[TickLog], meta: dict | None = None) -> None:
-    """``meta``: run facts that are not per tick (code version, policy set, ...) as a JSON string."""
+def save_log(path: str, log: list[TickLog], meta: dict | None = None, extra: dict | None = None) -> None:
+    """``meta``: run facts that are not per tick (code version, policy set, ...) as a JSON string.
+    ``extra``: more arrays on their own time base (e.g. the dashboard's 1 Hz ``board_*`` samples)."""
     import json
-    np.savez_compressed(path, t=[r.t for r in log], state=[r.state for r in log],
+    np.savez_compressed(path, **(extra or {}), t=[r.t for r in log], state=[r.state for r in log],
+                        temperatures=np.array([np.full(15, np.nan) if r.temperatures is None else r.temperatures
+                                               for r in log]),
                         on_fall=[r.on_fall for r in log], meta=json.dumps(meta or {}),
                         obs=np.array([np.full(61, np.nan) if r.obs is None else r.obs for r in log]),
                         targets=np.array([np.full(15, np.nan) if r.targets is None else r.targets for r in log]),

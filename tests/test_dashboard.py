@@ -232,3 +232,35 @@ def test_no_camera_means_no_camera_endpoints(dash):
     assert call(dash, "GET", "/api/media")[0] == 404
     assert call(dash, "POST", "/api/camera", {"action": "live_on"})[1]["ok"] is False
     assert frame(dash)["camera"] is None
+
+
+class FakeBoard:
+    def __init__(self):
+        self.temp_c, self.freq_mhz, self.throttled = 52.0, 1000, 0
+
+    def status(self):
+        from duck_runtime.board import decode_throttled
+        now, ever = decode_throttled(self.throttled)
+        return {"temp_c": self.temp_c, "freq_mhz": self.freq_mhz, "throttled": f"0x{self.throttled:x}",
+                "now": now, "ever": ever}
+
+
+def test_board_temperature_is_streamed_logged_and_recorded(dash):
+    import io as _io
+    assert frame(dash)["board"] is None and call(dash, "GET", "/api/info")[1]["board"] is False
+    dash.board = FakeBoard()
+    f = frame(dash, lambda f: f["board"] is not None)
+    assert f["board"]["temp_c"] == 52.0 and f["board"]["now"] == []
+    call(dash, "POST", "/api/action", {"action": "enable"})
+    assert call(dash, "POST", "/api/record", {"on": True})[1]["ok"]
+    time.sleep(1.2)
+    dash.board.throttled = 0x50001                      # under-voltage now
+    time.sleep(1.2)
+    name = call(dash, "POST", "/api/record", {"on": False})[1]["file"]
+    z = np.load(_io.BytesIO(call(dash, "GET", f"/logs/{name}")[1]), allow_pickle=True)
+    assert len(z["board_t"]) >= 2 and z["board_temp_c"][0] == 52.0
+    assert z["board_throttled"][0] == 0 and z["board_throttled"][-1] == 0x50001
+    assert z["temperatures"].shape[1] == 15 and np.all(z["temperatures"] == 40.0)
+    assert json.loads(str(z["meta"]))["board_at_save"]["now"] == ["欠压"]
+    _, ev = call(dash, "GET", "/api/events")
+    assert any("欠压" in e["message"] for e in (ev["events"] if isinstance(ev, dict) else ev))
