@@ -374,7 +374,7 @@ class Camera:
         w = self.writer
         return {
             "running": self.proc is not None, "live": self.live,
-            "fps": None if fps is None or stale else round(fps, 1),
+            "fps": None if fps is None or stale or self.proc is None else round(fps, 1),
             "size": list(self.size), "tuning": os.path.basename(self.tuning) if self.tuning else "default",
             "recording": ({"file": self.rec_name, "seconds": round(w.seconds, 1), "frames": w.frames,
                            "mb": round(w.bytes / 1e6, 1)} if w is not None else None),

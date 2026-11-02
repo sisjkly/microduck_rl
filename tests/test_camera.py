@@ -99,6 +99,7 @@ def test_live_frames_then_off(tmp_path):
         assert eventually(lambda: (cam.status()["fps"] or 0) > 10)
         cam.set_live(False)
         assert not cam.status()["running"] and cam.latest(timeout=0.1) is None
+        assert cam.status()["fps"] is None
     finally:
         cam.close()
 
