@@ -102,6 +102,14 @@ tr.group td { font-family: inherit; color: var(--muted); font-size: 11px; font-w
 details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin: 6px 0; }
 .keys { font-size: 11px; color: var(--muted); line-height: 1.6; }
 .keys kbd { font-family: var(--mono); background: var(--chip); border-radius: 4px; padding: 0 4px; }
+.cam { position: relative; aspect-ratio: 4 / 3; background: #000; border-radius: 8px; overflow: hidden; }
+.cam img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cam .off { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #9aa3ad; font-size: 13px; text-align: center; padding: 12px; }
+.cam .rec { position: absolute; top: 8px; left: 8px; display: none; background: rgba(185, 28, 28, .88); color: #fff;
+  padding: 2px 8px; border-radius: 6px; font: 600 12px var(--mono); }
+.cam .rec.show { display: block; }
+button.b.recording { background: var(--bad); border-color: var(--bad); color: #fff; }
 </style>
 </head>
 <body>
@@ -167,7 +175,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin:
       <div class="keys">键盘：<kbd>1</kbd> 上力矩 <kbd>2</kbd> 启动 <kbd>3</kbd> 停止 <kbd>0</kbd> 卸力 ·
         <kbd>w</kbd>/<kbd>s</kbd> 前后 <kbd>z</kbd>/<kbd>c</kbd> 左右 <kbd>a</kbd>/<kbd>d</kbd> 转向 <kbd>空格</kbd> 清零 ·
         <kbd>x</kbd> 坐/站 <kbd>g</kbd> 捡 <kbd>k</kbd>/<kbd>l</kbd> 踢 <kbd>r</kbd> 翻滚 <kbd>m</kbd> 张嘴 ·
-        <kbd>p</kbd> 换模型套（先停止）</div>
+        <kbd>p</kbd> 换模型套（先停止） · <kbd>v</kbd> 实时画面 <kbd>f</kbd> 拍照</div>
     </div>
   </section>
 
@@ -212,6 +220,21 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin:
   </section>
 
   <section class="col col3">
+    <div class="card" id="camCard" style="display:none">
+      <h2>摄像头 <span class="muted" id="camInfo"></span></h2>
+      <div class="cam">
+        <img id="camImg" alt="实时画面">
+        <div class="off" id="camOff">实时画面已关闭</div>
+        <div class="rec" id="camRecDot">● REC 0:00</div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="b" id="camLive">开启实时画面<span class="k">v</span></button>
+        <button class="b" id="camPhoto">拍照<span class="k">f</span></button>
+        <button class="b" id="camRec">开始录像</button>
+      </div>
+      <div class="refusal" id="camMsg"></div>
+      <details id="mediaBox"><summary>照片和视频</summary><div class="logs" id="media"></div></details>
+    </div>
     <div class="card">
       <h2>关节 <span class="muted">角度为相对 HOME，度</span></h2>
       <div class="tablewrap">
@@ -297,7 +320,8 @@ const KEYS = { "1": () => act("enable"), "2": () => act("start"), "3": () => act
   w: () => setAxis("vx", cmd.vx + 0.05), s: () => setAxis("vx", cmd.vx - 0.05),
   z: () => setAxis("vy", cmd.vy + 0.05), c: () => setAxis("vy", cmd.vy - 0.05),
   a: () => setAxis("wz", cmd.wz + 0.2), d: () => setAxis("wz", cmd.wz - 0.2), " ": zero,
-  x: () => act("sit"), m: () => setMouth(cmd.mouth > -4 ? -5 : 25), p: nextSet };
+  x: () => act("sit"), m: () => setMouth(cmd.mouth > -4 ? -5 : 25), p: nextSet,
+  v: () => { if (info && info.camera) $("camLive").click(); }, f: () => { if (info && info.camera) $("camPhoto").click(); } };
 async function nextSet() {
   const sets = (info && info.sets) || [];
   if (sets.length < 2) return;
@@ -319,6 +343,59 @@ document.addEventListener("keydown", (e) => {
   if (KEYS[k]) { KEYS[k](); e.preventDefault(); }
   else if (skill) { zero(); act("skill", { name: skill.name }); e.preventDefault(); }
 });
+
+// ---------- camera ----------
+const BLANK = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+const camQ = (extra) => { const q = new URLSearchParams(extra || {}); if (token) q.set("token", token); const s = q.toString(); return s ? "?" + s : ""; };
+let camStreaming = false, camState = null;
+function camView(on) {
+  const img = $("camImg");
+  if (on && !camStreaming) { img.src = "/camera/stream" + camQ({ t: Date.now() }); camStreaming = true; }
+  else if (!on && camStreaming) { img.src = BLANK; camStreaming = false; }   // closes the stream
+  $("camOff").style.display = on ? "none" : "flex";
+}
+$("camImg").onerror = () => { if (camStreaming) { camStreaming = false; } };
+const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+function renderCamera(c) {
+  if (!c) return;
+  camState = c;
+  $("camLive").firstChild.textContent = c.live ? "关闭实时画面" : "开启实时画面";
+  camView(c.live && c.running);
+  if (!(c.live && c.running)) $("camOff").textContent = c.live ? "摄像头启动中…" : "实时画面已关闭";
+  const r = c.recording;
+  $("camRec").textContent = r ? `停止录像 ${mmss(r.seconds)}` : "开始录像";
+  $("camRec").classList.toggle("recording", !!r);
+  $("camRecDot").classList.toggle("show", !!r);
+  if (r) $("camRecDot").textContent = `● REC ${mmss(r.seconds)} · ${r.mb} MB`;
+  $("camInfo").textContent = `${c.size[0]}×${c.size[1]}` + (c.fps ? ` · ${c.fps} fps` : "") + ` · ${c.tuning}`;
+  if (c.error) camMsg(c.error, true);
+}
+function camMsg(html, bad) { const m = $("camMsg"); m.innerHTML = html; m.className = bad ? "refusal" : "refusal muted"; }
+$("camLive").onclick = () => post("/api/camera", { action: camState && camState.live ? "live_off" : "live_on" });
+$("camPhoto").onclick = async () => {
+  const b = $("camPhoto"); b.disabled = true; b.firstChild.textContent = "拍照中…";
+  const j = await post("/api/camera", { action: "photo" });
+  b.disabled = false; b.firstChild.textContent = "拍照";
+  camMsg(j.ok ? `已保存 <a href="/media/${j.file}${camQ()}" target="_blank">${j.file}</a>（${j.size[0]}×${j.size[1]}）` : (j.error || "拍照失败"), !j.ok);
+  loadMedia();
+};
+$("camRec").onclick = async () => {
+  const j = await post("/api/camera", { action: camState && camState.recording ? "record_stop" : "record_start" });
+  if (j.ok && j.seconds !== undefined) {
+    camMsg(j.file ? `视频已保存 <a href="/media/${j.file}${camQ()}">${j.file}</a>（${j.seconds} s）` : "没有录到画面", !j.file);
+    loadMedia();
+  }
+};
+async function loadMedia() {
+  if (!info || !info.camera) return;
+  try {
+    const items = await (await fetch("/api/media" + camQ())).json();
+    $("media").innerHTML = items.length ? items.map((m) =>
+      `<div><a href="/media/${m.name}${camQ()}" ${m.kind === "photo" ? 'target="_blank"' : ""}>${m.kind === "photo" ? "照片" : "视频"} ${m.name}</a>` +
+      `<span>${(m.bytes / 1e6).toFixed(1)} MB · ${new Date(m.mtime * 1000).toLocaleString()}</span></div>`).join("")
+      : "<div><span>还没有照片或视频</span></div>";
+  } catch (e) {}
+}
 
 // ---------- static info ----------
 function setName(st) {
@@ -373,6 +450,7 @@ async function loadInfo() {
   $("onFall").value = info.on_fall; $("getup").value = info.getup_timeout_s || 0;
   if (info.token_required && !token) banner("没有控制权限：请用机器人终端上打印的带 token 的地址打开本页。");
   buildSets(); buildMoves(); buildJoints(); buildLadder();
+  $("camCard").style.display = info.camera ? "" : "none";
   const ms = info.mouth && info.mouth.servo;
   $("mouth").disabled = !ms;
   $("mouthNote").textContent = ms ? "键 m：张嘴/闭嘴" : "嘴没有接舵机：刷 15 舵机桥固件后用 tools mouth 标定（见 README）";
@@ -450,6 +528,7 @@ const STATE_CN = { limp: "卸力", ramp: "回 HOME", hold: "站立待命", run: 
 let infoReloading = false;
 function render(f) {
   frame = f; lastFrameAt = performance.now();
+  renderCamera(f.camera);
   if (info && info.sets && f.set != null && !infoReloading) {          // switched (here, a key, another tab)
     const cur = info.sets.find((st) => st.active);
     if (cur && cur.label !== f.set) { infoReloading = true; loadInfo().finally(() => { infoReloading = false; }); }
@@ -534,7 +613,7 @@ function connect() {
   es.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch (err) { console.error(err); } };
   es.onerror = () => { /* EventSource reconnects by itself */ };
 }
-loadInfo().then(() => { connect(); loadLogs(); loadEvents(); requestAnimationFrame(drawCharts); })
+loadInfo().then(() => { connect(); loadLogs(); loadEvents(); loadMedia(); requestAnimationFrame(drawCharts); })
   .catch((e) => banner("连不上机器人：" + e));
 </script>
 </body>

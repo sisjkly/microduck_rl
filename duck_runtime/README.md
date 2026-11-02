@@ -217,6 +217,23 @@ duck duck_runtime.dashboard --calib calib.json --set policies --set policies_hd1
   （~2.6 s）；满电 7/12 / 6/12；本机压降 0/12 / 0/12，都卡在 ~40° 侧躺：起身成不成主要看供电。
 - 他的模型只限个人非商业使用（见他仓库的 LICENSE）；`fetch_set` 不把模型放进本仓库，只在鸭子上下载。
 
+### 6. 摄像头（面板里的实时画面、拍照、录像）
+
+硬件：IMX219 160°（无红外截止滤光片），Pi Zero 2W 的 22 针口。`/boot/firmware/config.txt` 用 `camera_auto_detect=1`
+（不要留官方镜像里的 `dtoverlay=imx500`）。`rpicam-hello --list-cameras` 应列出 `imx219`；列不出、`dmesg` 里
+`failed to read chip id` = 排线（2026-10-30 换线解决）。
+
+- 面板启动时发现 `rpicam-vid` 就自动带摄像头卡片（`--camera off` 关掉）。摄像头**只在开实时画面或录像时运行**，
+  不用时零开销。
+- 实时画面：640×480、15 fps 的 MJPEG（`--camera-size`、`--camera-fps`），一个 `rpicam-vid` 进程（nice 10）同时供
+  画面和录像。默认 NoIR 调校 `imx219_noir.json`（不带滤光片的镜头用默认调校会偏粉），`--camera-tuning default` 换回。
+  装反了用 `--camera-args "--rotation 180"`。
+- 拍照：`rpicam-still` 1640×1232；开着画面会自动暂停 ~2 s 再恢复；录像中拍照存的是当前视频帧（不打断录像）。
+- 录像：写成 QuickTime `.mov`（Motion-JPEG，每帧真实时间戳，掉帧不会加速），QuickTime / VLC 直接播放，
+  不需要 ffmpeg（鸭子上没有，rpicam-apps 也没编 libav）。单个文件上限 2 GB（640×480 约 45 分钟）。
+- 文件在 `--media-dir`（默认 `media/`），面板“照片和视频”里下载。画面和文件都要 token（拍到的是房间）。
+- 键：`v` 开关实时画面，`f` 拍照。
+
 ## 先在电脑上预演
 
 在电脑上（不是鸭子上）：`git clone -b ours-813g-hd1910 https://github.com/sisjkly/microduck_rl.git && cd microduck_rl && uv sync`

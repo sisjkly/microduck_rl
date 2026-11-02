@@ -224,3 +224,11 @@ def test_client_resets_are_not_printed(capsys):
         assert "a real bug" in capsys.readouterr().err
     finally:
         srv.server_close()
+
+
+def test_no_camera_means_no_camera_endpoints(dash):
+    st, info = call(dash, "GET", "/api/info")
+    assert info["camera"] is None
+    assert call(dash, "GET", "/api/media")[0] == 404
+    assert call(dash, "POST", "/api/camera", {"action": "live_on"})[1]["ok"] is False
+    assert frame(dash)["camera"] is None

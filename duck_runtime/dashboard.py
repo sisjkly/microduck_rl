@@ -10,6 +10,10 @@ the keyboard. One process owns the hardware: stop ``duck_runtime.run`` first.
   # rehearse on a PC with the simulated duck (and this robot's battery sag)
   uv run python -m duck_runtime.dashboard --backend sim --set policies --supply robot
 
+Camera (when rpicam-vid exists, --camera off to disable): live MJPEG at /camera/stream,
+photos and .mov recordings in --media-dir (see camera.py). The camera only runs while the
+live view is on or a recording is going.
+
 Telemetry: Server-Sent Events at 10 Hz (/api/stream). Controls: JSON POSTs that need the
 session token printed at startup (the page keeps it after the first visit). Motion commands
 time out like the terminal driver's: no fresh command for 0.5 s -> zero twist (the page sends
@@ -46,6 +50,7 @@ COMMAND_TTL_S = 0.5
 LIMITS = {"vx": 0.3, "vy": 0.2, "wz": 1.0, "head_deg": 60.0}
 MOUTH_RANGE_DEG = (-5.0, 30.0)     # MJCF mouth travel; -5 = closed
 LOG_NAME = re.compile(r"^[A-Za-z0-9_.-]+\.npz$")
+MEDIA_NAME = re.compile(r"^duck_\d{8}-\d{6}\.(jpg|mov)$")
 
 
 def code_version() -> str:
@@ -83,8 +88,9 @@ class Dashboard:
     """Owns the control loop (call ``run`` on the main thread); HTTP threads only queue work."""
 
     def __init__(self, runner, io, bank, head, *, backend: str, log_dir: str,
-                 token: str | None, realtime: bool, calib_path: str | None = None):
+                 token: str | None, realtime: bool, calib_path: str | None = None, camera=None):
         self.runner, self.io, self.bank = runner, io, bank
+        self.camera = camera
         self.head_offset = head
         self.backend = backend
         self.realtime = realtime
@@ -257,6 +263,31 @@ class Dashboard:
             return {"ok": True}
         return self.submit(apply)
 
+    def camera_action(self, body: dict) -> dict:
+        """Runs on the HTTP thread (a photo takes ~2 s): the control loop never waits for it."""
+        cam = self.camera
+        if cam is None:
+            return {"ok": False, "error": "no camera (rpicam-vid not found, or --camera off)"}
+        act = body.get("action")
+        if act == "live_on":
+            res = {"ok": True, **cam.set_live(True)}
+        elif act == "live_off":
+            res = {"ok": True, **cam.set_live(False)}
+        elif act == "photo":
+            res = cam.photo()
+            self.log_event("info" if res["ok"] else "warn",
+                           f"photo {res['file']} ({res['size'][0]}x{res['size'][1]})" if res["ok"] else res["error"])
+        elif act == "record_start":
+            res = cam.start_recording()
+            self.log_event("info", f"video recording started: {res['file']}")
+        elif act == "record_stop":
+            res = cam.stop_recording()
+            if res.get("file"):
+                self.log_event("info", f"video saved: {res['file']} ({res['seconds']} s, {res['frames']} frames)")
+        else:
+            return {"ok": False, "error": f"unknown camera action {act!r}"}
+        return res
+
     def log_meta(self) -> dict:
         a = self.bank.active
         return {"version": self.version, "backend": self.backend, "set": a.label if a else None,
@@ -303,6 +334,10 @@ class Dashboard:
             "on_fall": r.on_fall, "getup_timeout_s": r.getup_timeout_s,
             "token_required": self.token is not None,
             "mouth": {"servo": self.mouth_servo(), "range_deg": MOUTH_RANGE_DEG},
+            "camera": (None if self.camera is None else
+                       {"size": list(self.camera.size), "fps": self.camera.fps,
+                        "still": list(self.camera.still_size),
+                        "tuning": self.camera.status()["tuning"]}),
         }
 
     def log_event(self, level: str, message: str) -> None:
@@ -386,6 +421,7 @@ class Dashboard:
             "recording": ({"on": True, "seconds": _num(time.time() - self.rec_started, 0),
                            "ticks": len(self.recording)} if self.recording is not None else {"on": False}),
             "clients": self.clients,
+            "camera": None if self.camera is None else self.camera.status(),
             "events_seq": self.event_seq,
         }
 
@@ -472,8 +508,79 @@ def make_handler(dash: Dashboard):
                            {"Content-Disposition": f'attachment; filename="{name}"'})
             elif path == "/api/stream":
                 self._stream()
+            elif path in ("/camera/stream", "/camera/frame.jpg", "/api/media") or path.startswith("/media/"):
+                self._camera_get(url, path)
             else:
                 self._json({"error": "not found"}, 404)
+
+        # -- camera: what the camera sees is the room, so these want the token too (query
+        # ?token=, since an <img> cannot send headers) -------------------------------------
+        def _camera_get(self, url, path):
+            q = parse_qs(url.query)
+            if dash.token is not None and q.get("token", [""])[0] != dash.token \
+                    and self.headers.get("X-Duck-Token") != dash.token:
+                self._json({"error": "missing or wrong token"}, 403)
+                return
+            cam = dash.camera
+            if cam is None:
+                self._json({"error": "no camera"}, 404)
+                return
+            if path == "/api/media":
+                self._json(cam.list_media())
+            elif path == "/camera/frame.jpg":
+                frame = cam.latest() if cam.status()["running"] else None
+                if frame is None:
+                    self._json({"error": "camera off"}, 503)
+                else:
+                    self._send(200, frame, "image/jpeg")
+            elif path == "/camera/stream":
+                self._mjpeg(cam)
+            else:
+                name = path[len("/media/"):]
+                p = cam.media_dir / name
+                if not MEDIA_NAME.match(name) or not p.is_file():
+                    self._json({"error": "not found"}, 404)
+                    return
+                self._file(p, "image/jpeg" if name.endswith(".jpg") else "video/quicktime",
+                           inline=name.endswith(".jpg") or q.get("inline", ["0"])[0] == "1")
+
+        def _file(self, p, ctype, inline):
+            size = p.stat().st_size                    # recordings can be large: stream, never load
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'{"inline" if inline else "attachment"}; filename="{p.name}"')
+            self.end_headers()
+            with open(p, "rb") as f:
+                while True:
+                    chunk = f.read(256 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+
+        def _mjpeg(self, cam):
+            if not cam.status()["running"]:
+                self._json({"error": "camera off"}, 503)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=duckframe")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            seq = -1
+            try:
+                while not dash.stop_event.is_set():
+                    seq, frame = cam.wait_frame(seq, timeout=2.0)
+                    if frame is None:
+                        if not cam.status()["running"]:
+                            break                      # live view turned off: end the response
+                        continue
+                    self.wfile.write(b"--duckframe\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                     + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
 
         def _stream(self):
             self.send_response(200)
@@ -516,7 +623,8 @@ def make_handler(dash: Dashboard):
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
                 route = {"/api/command": dash.set_command, "/api/action": dash.action, "/api/mouth": dash.set_mouth,
-                         "/api/settings": dash.settings, "/api/record": dash.record}.get(path)
+                         "/api/settings": dash.settings, "/api/record": dash.record,
+                         "/api/camera": dash.camera_action}.get(path)
                 if route is None:
                     self._json({"ok": False, "error": "not found"}, 404)
                     return
@@ -560,17 +668,38 @@ def main(argv=None):
     ap.add_argument("--token", default=None, help="fixed control token (default: a new random one each start)")
     ap.add_argument("--no-token", action="store_true", help="anyone who can reach the page may control the robot")
     ap.add_argument("--log-dir", default="logs", help="where recordings are written")
+    ap.add_argument("--camera", choices=["auto", "off"], default="auto",
+                    help="auto: use the camera when rpicam-vid exists (it runs only while viewed/recording)")
+    ap.add_argument("--camera-size", default="640x480", help="live/recording size WxH")
+    ap.add_argument("--camera-fps", type=int, default=15)
+    ap.add_argument("--camera-tuning", default="auto",
+                    help="auto: imx219_noir.json when present (this IMX219 has no IR filter); default: the "
+                         "sensor's stock tuning; or a tuning-file path")
+    ap.add_argument("--camera-args", default="", help="extra rpicam options, e.g. \"--rotation 180\"")
+    ap.add_argument("--media-dir", default="media", help="where photos and videos are written")
     args = ap.parse_args(argv)
 
     runner, io, bank, head = build_runner(args, ap)
     token = None if args.no_token else (args.token or secrets.token_urlsafe(9))
+    camera = None
+    if args.camera != "off":
+        from .camera import Camera
+        if Camera.available():
+            try:
+                w, h = (int(v) for v in args.camera_size.lower().split("x"))
+            except ValueError:
+                ap.error("--camera-size wants WxH, e.g. 640x480")
+            camera = Camera(args.media_dir, size=(w, h), fps=args.camera_fps,
+                            tuning=None if args.camera_tuning == "default" else args.camera_tuning,
+                            extra_args=args.camera_args)
     dash = Dashboard(runner, io, bank, head, backend=args.backend, log_dir=args.log_dir,
-                     token=token, realtime=args.backend == "sim", calib_path=args.calib)
+                     token=token, realtime=args.backend == "sim", calib_path=args.calib, camera=camera)
     if args.backend == "sim":
         runner.enable()                       # nobody is holding a simulated duck
     server = DashboardServer((args.host, args.http_port), make_handler(dash))
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"code {dash.version}, on fall: {runner.on_fall}")
+    print(f"code {dash.version}, on fall: {runner.on_fall}, camera: "
+          + (f"{camera.size[0]}x{camera.size[1]}@{camera.fps} ({camera.status()['tuning']})" if camera else "none"))
     print("dashboard:", "  ".join(_urls(args.http_port, token)))
     print("Ctrl+C here: torque off and exit")
     try:
@@ -579,6 +708,8 @@ def main(argv=None):
         pass
     finally:
         dash.shutdown()
+        if camera is not None:
+            camera.close()                    # finishes a recording in progress
         if dash.recording:
             from .run import save_log
             name = time.strftime("dash_%Y%m%d-%H%M%S.npz")
