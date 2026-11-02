@@ -76,8 +76,10 @@ select, input[type=number] { font: inherit; background: var(--btn); color: var(-
 .chart .ttl b { font-size: 12px; }
 .chart canvas { width: 100%; height: 110px; display: block; }
 .tablewrap { overflow-x: auto; }
+.lossbar { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; }
+.lossbar span { flex: 1; } .lossbar .b { flex: none; padding: 3px 10px; font-size: 12px; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-th, td { padding: 4px 6px; text-align: right; white-space: nowrap; }
+th, td { padding: 4px 5px; text-align: right; white-space: nowrap; }
 th { font-size: 11px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); }
 td { font-family: var(--mono); font-size: 12px; border-bottom: 1px solid var(--line); }
 td.name, th.name { text-align: left; font-family: inherit; }
@@ -85,7 +87,7 @@ td.name small { color: var(--muted); margin-left: 4px; font-family: var(--mono);
 tr.group td { font-family: inherit; color: var(--muted); font-size: 11px; font-weight: 600; text-align: left;
   background: var(--chip); border-bottom: 0; }
 .w { color: var(--warn); font-weight: 700; } .x { color: var(--bad); font-weight: 700; }
-.bar { position: relative; height: 6px; background: var(--track); border-radius: 3px; width: 70px; display: inline-block; vertical-align: middle; }
+.bar { position: relative; height: 6px; background: var(--track); border-radius: 3px; width: 40px; display: inline-block; vertical-align: middle; }
 .bar i { position: absolute; top: -2px; width: 3px; height: 10px; border-radius: 1px; background: var(--accent); }
 .bar u { position: absolute; top: -2px; width: 3px; height: 10px; border-radius: 1px; background: var(--muted); opacity: .6; }
 .events { max-height: 220px; overflow-y: auto; font-size: 12px; }
@@ -109,6 +111,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin:
 .cam .rec { position: absolute; top: 8px; left: 8px; display: none; background: rgba(185, 28, 28, .88); color: #fff;
   padding: 2px 8px; border-radius: 6px; font: 600 12px var(--mono); }
 .cam .rec.show { display: block; }
+/* camera turned 90/270 deg: a portrait box, the landscape stream rotated inside it */
+.cam.rot { aspect-ratio: 3 / 4; max-width: 340px; margin: 0 auto; }
+.cam.rot img { position: absolute; top: 50%; left: 50%; width: 133.333%; height: 75%; }
 button.b.recording { background: var(--bad); border-color: var(--bad); color: #fff; }
 </style>
 </head>
@@ -240,10 +245,12 @@ button.b.recording { background: var(--bad); border-color: var(--bad); color: #f
       <h2>关节 <span class="muted">角度为相对 HOME，度</span></h2>
       <div class="tablewrap">
         <table>
-          <thead><tr><th class="name">关节</th><th>位置</th><th>目标</th><th>误差</th><th>速度</th><th>电流 mA</th><th>电压</th><th>温度</th><th>范围</th></tr></thead>
+          <thead><tr><th class="name">关节</th><th>位置</th><th>目标</th><th>误差</th><th>速度</th><th title="mA">电流</th><th>电压</th><th>温度</th><th title="USB / 总线&#10;USB：树莓派⇄ESP32 上这个舵机的回包丢了几次（丢了立刻重读，约 20 ms）&#10;总线：ESP32⇄舵机上，读到的反馈超过 15 ms 没更新的拍数（ESP32 每 10 ms 轮询一次，说明它最近一次轮询没收到这个舵机的回复）">丢包 U/B</th><th>范围</th></tr></thead>
           <tbody id="joints"></tbody>
         </table>
       </div>
+      <div class="lossbar"><span class="muted" id="lossLine"></span>
+        <button class="b" id="lossReset" style="display:none">丢包清零</button></div>
     </div>
     <div class="card">
       <h2>记录 <button class="b" id="rec" style="flex:none;padding:3px 12px;font-size:12px">开始记录</button></h2>
@@ -311,6 +318,7 @@ $("policySet").onchange = async () => {
   if (!j.ok && j.error) $("refusal").textContent = "切换模型套：" + j.error;
 };
 $("getup").onchange = () => post("/api/settings", { getup_timeout_s: parseFloat($("getup").value) || 0 });
+$("lossReset").onclick = () => post("/api/action", { action: "loss_reset" });
 $("rec").onclick = async () => {
   const on = !(frame && frame.recording && frame.recording.on);
   const j = await post("/api/record", { on });
@@ -368,7 +376,12 @@ function renderCamera(c) {
   $("camRec").classList.toggle("recording", !!r);
   $("camRecDot").classList.toggle("show", !!r);
   if (r) $("camRecDot").textContent = `● REC ${mmss(r.seconds)} · ${r.mb} MB`;
-  $("camInfo").textContent = `${c.size[0]}×${c.size[1]}` + (c.fps ? ` · ${c.fps} fps` : "") + ` · ${c.tuning}`;
+  const vr = c.view_rotate || 0;
+  $("camImg").parentElement.classList.toggle("rot", !!vr);
+  $("camImg").style.transform = vr ? `translate(-50%, -50%) rotate(${-vr}deg)` : "";   // CSS turns clockwise
+  const shown = vr ? [c.size[1], c.size[0]] : c.size;
+  $("camInfo").textContent = `${shown[0]}×${shown[1]}` + (c.fps ? ` · ${c.fps} fps` : "") + ` · ${c.tuning}`
+    + (c.rotate ? ` · 逆时针 ${c.rotate}°` : "");
   if (c.error) camMsg(c.error, true);
 }
 function camMsg(html, bad) { const m = $("camMsg"); m.innerHTML = html; m.className = bad ? "refusal" : "refusal muted"; }
@@ -427,12 +440,12 @@ function buildJoints() {
   if (info.mouth && info.mouth.servo && !GROUPS[1][1].includes(9)) GROUPS[1][1].push(9);
   const tb = $("joints"); tb.innerHTML = "";
   GROUPS.forEach(([title, idx]) => {
-    const g = document.createElement("tr"); g.className = "group"; g.innerHTML = `<td colspan="9">${title}</td>`; tb.appendChild(g);
+    const g = document.createElement("tr"); g.className = "group"; g.innerHTML = `<td colspan="10">${title}</td>`; tb.appendChild(g);
     idx.forEach((j) => {
       const J = info.joints[j];
       const tr = document.createElement("tr"); tr.id = "j" + j;
       tr.innerHTML = `<td class="name">${J.name}${J.id != null ? `<small>#${J.id}</small>` : ""}</td>` +
-        "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" +
+        "<td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>" +
         `<td><span class="bar"><u></u><i></i></span></td>`;
       tb.appendChild(tr);
     });
@@ -525,6 +538,27 @@ const charts = {
 const fmt = (v, d = 1) => v == null ? "—" : (+v).toFixed(d);
 function cls(v, warn, bad, low) { if (v == null) return ""; if (low) return v < bad ? "x" : v < warn ? "w" : ""; return v > bad ? "x" : v > warn ? "w" : ""; }
 function cell(td, text, c) { td.textContent = text; td.className = c || ""; }
+const pct = (n, d) => d ? (100 * n / d) : 0;
+function lossCell(L, j, td) {
+  if (!L) { cell(td, "—"); td.title = ""; return; }
+  const u = L.usb_lost[j], b = L.bus_late[j], pu = pct(u, L.attempts), pb = pct(b, L.reads);
+  const cu = cls(pu, 0.1, 1), cb = cls(pb, 0.5, 5);
+  cell(td, `${u.toFixed(0)} / ${b.toFixed(0)}`, cu === "x" || cb === "x" ? "x" : (cu || cb));
+  td.title = `USB 回包丢失 ${u} 次 / ${L.attempts} 次读取（${pu.toFixed(2)}%）\n` +
+    `总线反馈过期（>${L.bus_late_ms} ms）${b} 拍 / ${L.reads} 拍（${pb.toFixed(2)}%）\n` +
+    `当前反馈年龄 ${L.age_ms[j] ?? "—"} ms，最大 ${L.age_max_ms[j]} ms`;
+}
+function renderLoss(L) {
+  $("lossReset").style.display = L ? "" : "none";
+  if (!L) { $("lossLine").textContent = ""; return; }
+  const u = L.usb_lost.reduce((a, b) => a + b, 0), b = L.bus_late.reduce((a, b) => a + b, 0), br = L.bridge;
+  const min = Math.max(L.since_s / 60, 1 / 60);
+  $("lossLine").textContent = `丢包 ${fmt(L.since_s / 60, 1)} 分钟内：USB 重读 ${L.retries} 次（${fmt(L.retries / min, 1)}/分）` +
+    (br ? ` · 总线不完整轮询 ${br.incomplete_polls}/${br.polls}（${fmt(pct(br.incomplete_polls, br.polls), 2)}%）` : "");
+  $("lossLine").title = `USB：每次重读丢了 1~15 个舵机的回包，合计 ${u} 个；总线：ESP32 每 10 ms 轮询全部舵机，` +
+    `有舵机没回就算一次不完整轮询（固件计数，每 5 s 更新）；表里“总线丢”是我们每拍看到的反馈过期，合计 ${b} 拍` +
+    (br ? `\nESP32 坏帧 ${br.bad_frames}，轮询周期 ${(br.cycle_us / 1000).toFixed(1)} ms` : "");
+}
 const STATE_CN = { limp: "卸力", ramp: "回 HOME", hold: "站立待命", run: "策略运行" };
 let infoReloading = false;
 function render(f) {
@@ -555,6 +589,7 @@ function render(f) {
       (ever.length ? `\n开机以来出现过：${ever.join("、")}` : "");
   }
   $("hdrHz").textContent = f.loop.hz == null ? "—" : `${fmt(f.loop.hz, 0)} Hz`; $("hdrHz").className = f.loop.hz && f.loop.hz < 45 ? "w" : "";
+  renderLoss(f.loss);
   $("hdrFalls").textContent = f.limped ? `${f.falls}（卸力 ${f.limped}）` : f.falls;
   if (f.refusal) $("refusal").textContent = f.refusal;
   document.querySelector('[data-act="enable"]').disabled = st !== "limp";
@@ -594,8 +629,9 @@ function render(f) {
       const cur = J.cur ? J.cur[j] : null; cell(td[5], cur == null ? "—" : Math.abs(cur).toFixed(0), cls(Math.abs(cur || 0), 2000, 3000));
       const v = J.volt ? J.volt[j] : null; cell(td[6], v == null || v <= 0 ? "—" : fmt(v, 1), cls(v > 0 ? v : null, 6.0, 5.0, true));
       const t = J.temp ? J.temp[j] : null; cell(td[7], t == null || t <= 0 ? "—" : t.toFixed(0), cls(t, 55, 65));
+      lossCell(f.loss, j, td[8]);
       const [lo, hi] = jj.limits_deg, span = hi - lo || 1;
-      const bar = td[8].querySelector(".bar");
+      const bar = td[9].querySelector(".bar");
       if (pos != null) bar.querySelector("i").style.left = `calc(${Math.max(0, Math.min(1, (pos - lo) / span)) * 100}% - 1px)`;
       bar.querySelector("u").style.left = `calc(${Math.max(0, Math.min(1, (0 - lo) / span)) * 100}% - 1px)`;
     });

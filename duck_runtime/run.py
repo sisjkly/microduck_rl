@@ -249,6 +249,10 @@ def save_log(path: str, log: list[TickLog], meta: dict | None = None, extra: dic
     np.savez_compressed(path, **(extra or {}), t=[r.t for r in log], state=[r.state for r in log],
                         temperatures=np.array([np.full(15, np.nan) if r.temperatures is None else r.temperatures
                                                for r in log]),
+                        fb_age_ms=np.array([np.full(15, np.nan) if r.fb_age_ms is None else r.fb_age_ms
+                                            for r in log]),
+                        usb_missed=np.array([np.full(15, np.nan) if r.usb_missed is None else r.usb_missed
+                                             for r in log]),
                         on_fall=[r.on_fall for r in log], meta=json.dumps(meta or {}),
                         obs=np.array([np.full(61, np.nan) if r.obs is None else r.obs for r in log]),
                         targets=np.array([np.full(15, np.nan) if r.targets is None else r.targets for r in log]),

@@ -54,6 +54,8 @@ class TickLog:
     voltages: np.ndarray | None = None   # V per servo (bridge): sag under load slows big moves
     on_fall: str = ""                    # limp / keep / getup at this tick (the dashboard can switch it)
     temperatures: np.ndarray | None = None   # °C per servo (bridge, register 63)
+    fb_age_ms: np.ndarray | None = None      # bridge: ms since the bus last heard from each servo
+    usb_missed: np.ndarray | None = None     # bridge: this tick's replies lost on USB, per servo
 
 
 # Ground pick beak, scripted on the training phases (microduck_ground_pick_env_cfg.py:
@@ -398,7 +400,11 @@ class Runner:
                                     None if getattr(self.io, "voltages", None) is None
                                     else np.array(self.io.voltages, dtype=float), self.on_fall,
                                     None if getattr(self.io, "temperatures", None) is None
-                                    else np.array(self.io.temperatures, dtype=float)))
+                                    else np.array(self.io.temperatures, dtype=float),
+                                    None if getattr(self.io, "fb_age_ms", None) is None
+                                    else np.array(self.io.fb_age_ms, dtype=float),
+                                    None if getattr(self.io, "tick_usb_missed", None) is None
+                                    else np.array(self.io.tick_usb_missed, dtype=float)))
         self.io.wait_tick()
         return s
 

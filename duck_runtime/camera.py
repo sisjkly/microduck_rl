@@ -14,6 +14,12 @@ recording is going, at low priority (nice 10), so the 50 Hz control loop keeps t
 
 This build (2026-10-30): IMX219 160 deg without an IR-cut filter -> the stock tuning is pink;
 ``imx219_noir.json`` gives natural colour, so it is the default when present.
+
+Rotation (``rotate``, degrees counterclockwise; the sensor can only flip, so 90/270 are not done
+on the pixels, which would cost the Pi Zero a JPEG decode+encode per frame): 180 is the
+sensor's own ``--rotation 180``; 90/270 are applied where the picture is shown - the live view
+rotates in the browser (CSS), recordings carry the rotation in the .mov track matrix
+(QuickTime, VLC, browsers and ffmpeg honour it), photos carry an EXIF Orientation tag.
 """
 
 from __future__ import annotations
@@ -31,6 +37,88 @@ NOIR_TUNING = "/usr/share/libcamera/ipa/rpi/vc4/imx219_noir.json"
 SOI, EOI = b"\xff\xd8", b"\xff\xd9"
 MAX_RECORDING_BYTES = 2_000_000_000          # 32-bit chunk offsets; ~45 min at 640x480/15 fps
 MAX_BUFFER = 4_000_000                       # drop garbage that never forms a frame
+ROTATIONS = (0, 90, 180, 270)                # counterclockwise
+EXIF_ORIENTATION = {0: 1, 90: 8, 180: 3, 270: 6}   # 8: "rotate 90 CCW to display", 6: 90 CW
+
+
+def _exif_orientation_app1(orient: int) -> bytes:
+    """A minimal APP1 Exif segment whose IFD0 holds only the Orientation tag."""
+    tiff = b"MM\x00\x2a" + struct.pack(">I", 8) + struct.pack(">H", 1) \
+        + struct.pack(">HHIHH", 0x0112, 3, 1, orient, 0) + struct.pack(">I", 0)
+    body = b"Exif\x00\x00" + tiff
+    return b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body
+
+
+def _find_orientation(tiff: bytes) -> int | None:
+    """Offset (in ``tiff``) of IFD0's Orientation value, or None."""
+    if tiff[:2] not in (b"II", b"MM"):
+        return None
+    e = "<" if tiff[:2] == b"II" else ">"
+    try:
+        ifd = struct.unpack_from(e + "I", tiff, 4)[0]
+        n = struct.unpack_from(e + "H", tiff, ifd)[0]
+        for k in range(n):
+            at = ifd + 2 + 12 * k
+            tag, typ = struct.unpack_from(e + "HH", tiff, at)
+            if tag == 0x0112 and typ == 3:
+                return at + 8
+    except struct.error:
+        return None
+    return None
+
+
+def jpeg_set_orientation(data: bytes, orient: int) -> bytes:
+    """``data`` with EXIF Orientation ``orient``: patched in place when the JPEG's Exif already
+    has the tag, else that Exif block is replaced by a minimal one (or one is added)."""
+    if data[:2] != SOI:
+        return data
+    i = 2
+    while i + 4 <= len(data) and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker == 0xDA or not (0xE0 <= marker <= 0xEF or marker in (0xDB, 0xC4, 0xDD, 0xFE)):
+            break                                   # image data / frame header: stop looking
+        seg = struct.unpack(">H", data[i + 2:i + 4])[0]
+        if marker == 0xE1 and data[i + 4:i + 10] == b"Exif\x00\x00":
+            tiff_at = i + 10
+            off = _find_orientation(data[tiff_at:i + 2 + seg])
+            if off is not None:
+                e = "<" if data[tiff_at:tiff_at + 2] == b"II" else ">"
+                at = tiff_at + off
+                return data[:at] + struct.pack(e + "H", orient) + data[at + 2:]
+            return data[:i] + _exif_orientation_app1(orient) + data[i + 2 + seg:]
+        i += 2 + seg
+    return data[:2] + _exif_orientation_app1(orient) + data[2:]
+
+
+def jpeg_orientation(data: bytes) -> int | None:
+    """The EXIF Orientation of a JPEG, or None (tests / checks)."""
+    i = 2
+    while i + 4 <= len(data) and data[i] == 0xFF and data[i + 1] != 0xDA:
+        seg = struct.unpack(">H", data[i + 2:i + 4])[0]
+        if data[i + 1] == 0xE1 and data[i + 4:i + 10] == b"Exif\x00\x00":
+            tiff = data[i + 10:i + 2 + seg]
+            off = _find_orientation(tiff)
+            if off is None:
+                return None
+            return struct.unpack_from(("<" if tiff[:2] == b"II" else ">") + "H", tiff, off)[0]
+        i += 2 + seg
+    return None
+
+
+def mov_matrix(rotate: int, w: int, h: int) -> tuple[bytes, int, int]:
+    """QuickTime display matrix for showing a w x h picture turned ``rotate`` degrees
+    counterclockwise -> (matrix, display width, display height). Rows (a b u)(c d v)(tx ty w):
+    x' = a x + c y + tx, y' = b x + d y + ty, in screen coordinates (y down)."""
+    one = 0x10000
+    if rotate == 90:
+        m, dw, dh = (0, -one, 0, one, 0, 0, 0, w * one, 0x40000000), h, w
+    elif rotate == 270:
+        m, dw, dh = (0, one, 0, -one, 0, 0, h * one, 0, 0x40000000), h, w
+    elif rotate == 180:
+        m, dw, dh = (-one, 0, 0, 0, -one, 0, w * one, h * one, 0x40000000), w, h
+    else:
+        m, dw, dh = (one, 0, 0, 0, one, 0, 0, 0, 0x40000000), w, h
+    return struct.pack(">9i", *m), dw, dh
 
 
 def _jpeg_size(frame: bytes) -> tuple[int, int] | None:
@@ -58,8 +146,9 @@ class MovWriter:
 
     TIMESCALE = 1000                          # ms
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, rotate: int = 0):
         self.path = Path(path)
+        self.rotate = rotate                  # counterclockwise, shown by the player
         self.f = open(self.path, "wb")
         self.f.write(self._atom(b"ftyp", b"qt  " + struct.pack(">I", 0) + b"qt  "))
         self.mdat_at = self.f.tell()
@@ -125,9 +214,10 @@ class MovWriter:
         # matrix, preview/poster/selection/current times (6 x 0), next track id
         mvhd = A(b"mvhd", struct.pack(">IIIIIIH", 0, now, now, self.TIMESCALE, total, 0x10000, 0x100)
                  + b"\0" * 10 + matrix + b"\0" * 24 + struct.pack(">I", 2))
+        track_matrix, dw, dh = mov_matrix(self.rotate, self.width, self.height)
         tkhd = A(b"tkhd", struct.pack(">IIIIII", 3, now, now, 1, 0, total) + b"\0" * 8
-                 + struct.pack(">HHHH", 0, 0, 0, 0) + matrix
-                 + struct.pack(">II", self.width << 16, self.height << 16))
+                 + struct.pack(">HHHH", 0, 0, 0, 0) + track_matrix
+                 + struct.pack(">II", dw << 16, dh << 16))
         mdhd = A(b"mdhd", struct.pack(">IIIIIHH", 0, now, now, self.TIMESCALE, total, 0, 0))
         hdlr = A(b"hdlr", struct.pack(">I", 0) + b"mhlr" + b"vide" + b"\0" * 12 + b"\x0cVideoHandler")
         vmhd = A(b"vmhd", struct.pack(">IHHHH", 1, 0x40, 0x8000, 0x8000, 0x8000))
@@ -161,7 +251,10 @@ class Camera:
 
     def __init__(self, media_dir: str | Path, size=(640, 480), fps: int = 15, tuning: str | None = "auto",
                  extra_args: str = "", still_size=(1640, 1232), vid_cmd: str = "rpicam-vid",
-                 still_cmd: str = "rpicam-still", nice: int = 10):
+                 still_cmd: str = "rpicam-still", nice: int = 10, rotate: int = 0):
+        if rotate not in ROTATIONS:
+            raise ValueError(f"rotate must be one of {ROTATIONS} (degrees counterclockwise)")
+        self.rotate = rotate
         self.media_dir = Path(media_dir)
         self.media_dir.mkdir(parents=True, exist_ok=True)
         self.size, self.fps, self.still_size = tuple(size), int(fps), tuple(still_size)
@@ -191,7 +284,20 @@ class Camera:
 
     # -- process -------------------------------------------------------------------------
     def _tuning_args(self) -> list[str]:
-        return ["--tuning-file", self.tuning] if self.tuning else []
+        return (["--tuning-file", self.tuning] if self.tuning else []) \
+            + (["--rotation", "180"] if self.rotate == 180 else [])
+
+    def _soft_rotate(self) -> int:
+        """The rotation left to the viewer (90/270; 180 is done by the sensor)."""
+        return self.rotate if self.rotate in (90, 270) else 0
+
+    def _shown(self, size) -> list[int]:
+        w, h = size
+        return [h, w] if self._soft_rotate() else [w, h]
+
+    def _orient(self, data: bytes) -> bytes:
+        r = self._soft_rotate()
+        return jpeg_set_orientation(data, EXIF_ORIENTATION[r]) if r else data
 
     def _start_proc(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
@@ -311,8 +417,8 @@ class Camera:
                 if frame is None:
                     return {"ok": False, "error": "no frame yet"}
                 name = self._name("jpg")
-                (self.media_dir / name).write_bytes(frame)
-                return {"ok": True, "file": name, "size": list(self.size), "from": "stream (recording)"}
+                (self.media_dir / name).write_bytes(self._orient(frame))
+                return {"ok": True, "file": name, "size": self._shown(self.size), "from": "stream (recording)"}
             was_running = self.proc is not None
             self._stop_proc()
             name = self._name("jpg")
@@ -330,14 +436,17 @@ class Camera:
             if not ok:
                 self.error = f"photo failed: {err}"
                 return {"ok": False, "error": self.error}
-            return {"ok": True, "file": name, "size": [w, h], "from": "still"}
+            if self._soft_rotate():
+                p = self.media_dir / name
+                p.write_bytes(self._orient(p.read_bytes()))
+            return {"ok": True, "file": name, "size": self._shown((w, h)), "from": "still"}
 
     def start_recording(self) -> dict:
         with self.lock:
             if self.writer is not None:
                 return {"ok": True, "file": self.rec_name}
             self.rec_name = self._name("mov")
-            self.writer = MovWriter(self.media_dir / self.rec_name)
+            self.writer = MovWriter(self.media_dir / self.rec_name, rotate=self._soft_rotate())
             self._keep_running()
             return {"ok": True, "file": self.rec_name}
 
@@ -375,7 +484,8 @@ class Camera:
         return {
             "running": self.proc is not None, "live": self.live,
             "fps": None if fps is None or stale or self.proc is None else round(fps, 1),
-            "size": list(self.size), "tuning": os.path.basename(self.tuning) if self.tuning else "default",
+            "size": list(self.size), "rotate": self.rotate, "view_rotate": self._soft_rotate(),
+            "tuning": os.path.basename(self.tuning) if self.tuning else "default",
             "recording": ({"file": self.rec_name, "seconds": round(w.seconds, 1), "frames": w.frames,
                            "mb": round(w.bytes / 1e6, 1)} if w is not None else None),
             "error": self.error,

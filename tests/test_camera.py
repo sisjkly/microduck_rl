@@ -252,3 +252,79 @@ def test_dashboard_camera_flow(camdash):
     c, r = _req(d, "GET", "/api/events?since=0")
     text = " ".join(e["message"] for e in json.loads(r.read()))
     assert "video saved" in text and "recording started" in text
+
+
+# -- rotation ----------------------------------------------------------------------------------
+def _ffmpeg():
+    return pytest.importorskip("imageio_ffmpeg").get_ffmpeg_exe()
+
+
+def _rgb(ffmpeg, args, w, h):
+    import subprocess
+    import numpy as np
+    out = subprocess.run([ffmpeg, "-v", "error", *args, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                         capture_output=True, check=True).stdout
+    return np.frombuffer(out, np.uint8).reshape(h, w, 3).astype(int)
+
+
+def test_exif_orientation_added_patched_and_replaced():
+    from duck_runtime.camera import jpeg_orientation, jpeg_set_orientation, _exif_orientation_app1
+    assert jpeg_orientation(JPEG) is None
+    a = jpeg_set_orientation(JPEG, 8)
+    assert jpeg_orientation(a) == 8 and _jpeg_size(a) == _jpeg_size(JPEG)
+    b = jpeg_set_orientation(a, 6)                      # patched in place: same length
+    assert jpeg_orientation(b) == 6 and len(b) == len(a)
+    # an Exif block without the tag (as a camera might write) is replaced
+    tiff = b"II\x2a\x00" + struct.pack("<I", 8) + struct.pack("<H", 1) + struct.pack("<HHII", 0x010F, 2, 4, 0x00756f79) + b"\0\0\0\0"
+    body = b"Exif\x00\x00" + tiff
+    c = JPEG[:2] + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + JPEG[2:]
+    assert jpeg_orientation(c) is None
+    d = jpeg_set_orientation(c, 8)
+    assert jpeg_orientation(d) == 8 and d.count(b"Exif\x00\x00") == 1
+    assert _exif_orientation_app1(8)[:2] == b"\xff\xe1"
+
+
+def test_exif_orientation_is_what_pillow_shows():
+    pil = pytest.importorskip("PIL.Image")
+    from PIL import ImageOps
+    import io as _io
+    from duck_runtime.camera import jpeg_set_orientation
+    im = ImageOps.exif_transpose(pil.open(_io.BytesIO(jpeg_set_orientation(JPEG, 8))))
+    assert im.size == (24, 32)
+
+
+@pytest.mark.parametrize("rotate", [90, 270])
+def test_mov_rotation_matrix_turns_the_picture_ccw(tmp_path, rotate):
+    """A real asymmetric frame through MovWriter(rotate) and ffmpeg's autorotate == numpy rot90."""
+    import subprocess
+    import numpy as np
+    ffmpeg = _ffmpeg()
+    src = tmp_path / "f.jpg"
+    subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=1", "-frames:v", "1",
+                    "-q:v", "2", str(src)], check=True)
+    frame = src.read_bytes()
+    w = MovWriter(tmp_path / "r.mov", rotate=rotate)
+    for k in range(3):
+        w.add(frame, k / 15)
+    w.close()
+    orig = _rgb(ffmpeg, ["-i", str(src)], 64, 48)
+    shown = _rgb(ffmpeg, ["-i", str(tmp_path / "r.mov")], 48, 64)     # autorotate is on by default
+    want = np.rot90(orig, k=1 if rotate == 90 else -1)                 # np.rot90 k=1: counterclockwise
+    assert shown.shape == want.shape and np.abs(shown - want).mean() < 12
+    tk = find((tmp_path / "r.mov").read_bytes(), ["moov", "trak", "tkhd"])
+    assert struct.unpack(">II", tk[-8:]) == (48 << 16, 64 << 16)
+
+
+def test_camera_rotate_90_photo_and_status(tmp_path):
+    from duck_runtime.camera import jpeg_orientation
+    cam = make_cam(tmp_path, rotate=90)
+    st = cam.status()
+    assert st["rotate"] == 90 and st["view_rotate"] == 90
+    r = cam.photo()
+    assert r["ok"] and r["size"] == [1232, 1640]
+    assert jpeg_orientation((tmp_path / "media" / r["file"]).read_bytes()) == 8
+    cam180 = make_cam(tmp_path, rotate=180)
+    assert "--rotation" in cam180._tuning_args() and cam180.status()["view_rotate"] == 0
+    with pytest.raises(ValueError):
+        make_cam(tmp_path, rotate=45)
+    cam.close(); cam180.close()

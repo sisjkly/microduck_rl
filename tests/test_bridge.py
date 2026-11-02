@@ -78,6 +78,9 @@ class FakeBridge:
         self.alive = True
         self.mute = False            # an ESP32 that stopped answering (rebooting, USB gone)
         self.drop_sync_reads = 0     # the next N SYNC READs lose two replies on the USB link
+        self.age = {i: 4 for i in self.ids}   # ms since the bus last heard from each servo
+        self.t0 = time.monotonic()
+        self.incomplete_polls = 0
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
 
@@ -92,12 +95,15 @@ class FakeBridge:
             b[:4] = b"MDK2"
             struct.pack_into("<HHHHH", b, 4, 2, self.ALL, self.ALL, self.torque, self.fault)
             struct.pack_into("<H", b, 48, self.ALL)
+            struct.pack_into("<II", b, 16, int((time.monotonic() - self.t0) * 1000), 0)
+            struct.pack_into("<I", b, 32, self.incomplete_polls)
             return bytes(b)
         if addr == 320 and n == 32:
             b = bytearray(32)
             dx = 2048 + self.dir[i] * (self.raw[i] - self.center[i])
             struct.pack_into("<iihhH", b, 0, self.raw[i], dx, self.speed[i], 120, 75)
             b[14], b[15] = 30, 0
+            struct.pack_into("<I", b, 16, self.age[i])
             struct.pack_into("<ibBB", b, 20, self.center[i], self.dir[i], self.mode, 1)
             b[27] = 1 | 2 | (4 if self.torque >> (i - 1) & 1 else 0) | 8
             struct.pack_into("<HH", b, 28, 0, 4095)
@@ -680,3 +686,36 @@ def test_a_lost_sync_read_reply_costs_a_quick_retry_not_a_missed_tick():
 def test_native_reads_keep_the_long_wait():
     assert B.Bridge._timing(B.NATIVE_BASE + 50, 0.25) == (0.25, B.NATIVE_SETTLE_S)
     assert B.Bridge._timing(B.ADDR_DIAG, None) == (B.CACHE_TIMEOUT_S, B.CACHE_SETTLE_S)
+
+
+def test_loss_is_counted_per_servo_usb_and_bus():
+    master, slave = pty.openpty()
+    fake = FakeBridge(master)
+    cal = _calibrated()
+    io = B.BridgeIO(os.ttyname(slave), cal, StaticImu(), control_dt=0.002)
+    k_of = {j.id: k for k, j in enumerate(cal.joints) if j.id}
+    try:
+        io.read()
+        a, b = io.ids[5:7]                                # what FakeBridge drops
+        fake.drop_sync_reads = 1                          # those two lost on USB once
+        io.read()
+        assert io.tick_usb_missed[k_of[a]] == 1 and io.tick_usb_missed[k_of[io.ids[0]]] == 0
+        io.read()
+        assert io.tick_usb_missed.sum() == 0              # per tick, cleared on the next read
+        fake.age[3] = 40                                  # the bus missed servo 3 for a few polls
+        io.read(); io.read()
+        fake.age[3] = 4
+        io.read()
+        fake.incomplete_polls = 7
+        io._poll_status(force=True)
+        L = io.loss()
+        assert L["usb_lost"][k_of[a]] == 1 and L["usb_lost"][k_of[b]] == 1 and sum(L["usb_lost"]) == 2
+        assert L["bus_late"][k_of[3]] == 2 and sum(L["bus_late"]) == 2
+        assert L["age_ms"][k_of[3]] == 4 and L["age_max_ms"][k_of[3]] == 40
+        assert L["attempts"] == L["reads"] + 1 == 7 and L["retries"] == 1
+        assert L["bridge"]["incomplete_polls"] == 7
+        io.reset_loss()
+        assert sum(io.loss()["usb_lost"]) == 0 and io.loss()["reads"] == 0
+    finally:
+        fake.alive = False
+        io.close()

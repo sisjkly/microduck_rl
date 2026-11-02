@@ -212,6 +212,7 @@ class Dashboard:
             "stop": lambda: (r.stop(), {"ok": True})[1],
             "limp": lambda: (r.limp(), {"ok": True})[1],
             "sit": lambda: outcome(r.sit_toggle(), "sit/stand"),
+            "loss_reset": self._loss_reset,
         }
         if name == "skill":
             skill = str(body.get("name", ""))
@@ -298,12 +299,21 @@ class Dashboard:
             return {"ok": False, "error": f"unknown camera action {act!r}"}
         return res
 
+    def _loss_reset(self) -> dict:
+        reset = getattr(self.io, "reset_loss", None)
+        if reset is None:
+            return {"ok": False, "error": "this backend has no loss counters"}
+        reset()
+        self.log_event("info", "丢包计数清零")
+        return {"ok": True}
+
     def log_meta(self) -> dict:
         a = self.bank.active
         return {"version": self.version, "backend": self.backend, "set": a.label if a else None,
                 "walk": a.pset.walk_file if a else None, "on_fall_at_save": self.runner.on_fall,
                 "getup_timeout_s": self.runner.getup_timeout_s, "calib": self.calib_path,
-                "board_at_save": None if self.board is None else self.board.status()}
+                "board_at_save": None if self.board is None else self.board.status(),
+                "loss_at_save": self.io.loss() if hasattr(self.io, "loss") else None}
 
     def board_arrays(self) -> dict:
         """The recording's board samples as npz arrays (board_t is on the same clock as t), and
@@ -373,7 +383,7 @@ class Dashboard:
             "mouth": {"servo": self.mouth_servo(), "range_deg": MOUTH_RANGE_DEG},
             "camera": (None if self.camera is None else
                        {"size": list(self.camera.size), "fps": self.camera.fps,
-                        "still": list(self.camera.still_size),
+                        "still": list(self.camera.still_size), "rotate": self.camera.rotate,
                         "tuning": self.camera.status()["tuning"]}),
             "board": self.board is not None,
         }
@@ -462,6 +472,7 @@ class Dashboard:
             "clients": self.clients,
             "camera": None if self.camera is None else self.camera.status(),
             "board": None if self.board is None else self.board.status(),
+            "loss": self.io.loss() if hasattr(self.io, "loss") else None,
             "events_seq": self.event_seq,
         }
 
@@ -718,7 +729,10 @@ def main(argv=None):
     ap.add_argument("--camera-tuning", default="auto",
                     help="auto: imx219_noir.json when present (this IMX219 has no IR filter); default: the "
                          "sensor's stock tuning; or a tuning-file path")
-    ap.add_argument("--camera-args", default="", help="extra rpicam options, e.g. \"--rotation 180\"")
+    ap.add_argument("--camera-rotate", type=int, choices=[0, 90, 180, 270], default=90,
+                    help="degrees COUNTERCLOCKWISE (default 90: how this duck's camera is mounted). 180 is "
+                         "done by the sensor; 90/270 by the viewer (browser, .mov matrix, photo EXIF)")
+    ap.add_argument("--camera-args", default="", help="extra rpicam options")
     ap.add_argument("--media-dir", default="media", help="where photos and videos are written")
     ap.add_argument("--no-board", action="store_true",
                     help="don't read the Pi's temperature / throttle flags (vcgencmd)")
@@ -736,7 +750,7 @@ def main(argv=None):
                 ap.error("--camera-size wants WxH, e.g. 640x480")
             camera = Camera(args.media_dir, size=(w, h), fps=args.camera_fps,
                             tuning=None if args.camera_tuning == "default" else args.camera_tuning,
-                            extra_args=args.camera_args)
+                            extra_args=args.camera_args, rotate=args.camera_rotate)
     board = None
     if not args.no_board:
         from .board import BoardMonitor
@@ -749,7 +763,8 @@ def main(argv=None):
     server = DashboardServer((args.host, args.http_port), make_handler(dash))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"code {dash.version}, on fall: {runner.on_fall}, camera: "
-          + (f"{camera.size[0]}x{camera.size[1]}@{camera.fps} ({camera.status()['tuning']})" if camera else "none")
+          + (f"{camera.size[0]}x{camera.size[1]}@{camera.fps} ({camera.status()['tuning']}, "
+             f"rotate {camera.rotate} ccw)" if camera else "none")
           + (f", Pi board: {board.temp_c} °C" if board is not None and board.temp_c is not None else ""))
     print("dashboard:", "  ".join(_urls(args.http_port, token)))
     print("Ctrl+C here: torque off and exit")

@@ -264,3 +264,22 @@ def test_board_temperature_is_streamed_logged_and_recorded(dash):
     assert json.loads(str(z["meta"]))["board_at_save"]["now"] == ["欠压"]
     _, ev = call(dash, "GET", "/api/events")
     assert any("欠压" in e["message"] for e in (ev["events"] if isinstance(ev, dict) else ev))
+
+
+def test_per_servo_loss_is_streamed_and_can_be_reset(dash):
+    assert frame(dash)["loss"] is None
+    assert call(dash, "POST", "/api/action", {"action": "loss_reset"})[1]["ok"] is False
+    counts = {"n": 3}
+
+    def loss():
+        return {"since_s": 60.0, "attempts": 3000, "reads": 2997, "retries": 3,
+                "usb_lost": [counts["n"]] + [0] * 14, "bus_late": [0] * 14 + [5],
+                "age_ms": [4] * 15, "age_max_ms": [9] * 15, "bus_late_ms": 15,
+                "bridge": {"incomplete_polls": 12, "polls": 6000, "bad_frames": 0, "frames": 3100,
+                           "seconds": 60.0, "cycle_us": 7400}}
+    dash.io.loss = loss
+    dash.io.reset_loss = lambda: counts.update(n=0)
+    f = frame(dash, lambda f: f["loss"] is not None)
+    assert f["loss"]["usb_lost"][0] == 3 and f["loss"]["bus_late"][14] == 5
+    assert call(dash, "POST", "/api/action", {"action": "loss_reset"})[1]["ok"]
+    assert frame(dash, lambda f: f["loss"] and f["loss"]["usb_lost"][0] == 0)

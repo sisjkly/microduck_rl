@@ -64,6 +64,14 @@ class BridgeError(RuntimeError):
     pass
 
 
+class NoReply(BridgeError):
+    """Some expected replies never came (``missing``: their virtual IDs)."""
+
+    def __init__(self, msg: str, missing: list[int]):
+        super().__init__(msg)
+        self.missing = list(missing)
+
+
 # -- Dynamixel 2.0 framing (same CRC/stuffing as bridge_protocol.h) ----------------------
 def _crc_table():
     out = []
@@ -203,6 +211,17 @@ CACHE_TIMEOUT_S = 0.015
 CACHE_SETTLE_S = 0.004
 NATIVE_SETTLE_S = 0.12
 
+# Two places a servo's data can go missing, counted per servo by BridgeIO:
+#  - USB (Pi <-> ESP32): that servo's reply in our SYNC READ never arrived (usb_lost).
+#  - bus (ESP32 <-> servo): the firmware polls every servo every POLL_MS = 10 ms
+#    (bridge_config.h) and stamps each reply; READ 320 bytes 16-19 is that stamp's age. Fresh
+#    feedback is 0-~11 ms old, so older than BUS_LATE_MS means the bridge's last poll got no
+#    answer from that servo (bus_late; a single missed poll shows in about half the ticks that
+#    sample it, two or more in a row always). The firmware itself only counts polls where any
+#    servo was missing (status incomplete_polls), read every STATUS_EVERY_S.
+BUS_LATE_MS = 15
+STATUS_EVERY_S = 5.0
+
 
 class Bridge:
     def __init__(self, path: str, timeout_s: float = 0.03):
@@ -229,7 +248,7 @@ class Bridge:
                 # cannot take a stale reply for its own. Cache reads never answer late.
                 time.sleep(settle_s)
                 self.port.drain()
-                raise BridgeError(f"no reply from virtual ID(s) {missing}")
+                raise NoReply(f"no reply from virtual ID(s) {missing}", missing)
             for id_, err, params in self.parser.feed(self.port.read_some(left)):
                 if id_ in expect:
                     got[id_] = (err, params)
@@ -306,6 +325,7 @@ def parse_diag(b: bytes) -> dict:
     flags = b[27]
     return dict(raw=raw, speed=speed, current_ma=current, voltage=b[12] * 0.1, temperature=b[14],
                 error=b[15], center=center, direction=struct.unpack("b", b[24:25])[0], mode=b[25],
+                age_ms=struct.unpack_from("<I", b, 16)[0],
                 fresh=bool(flags & 1), configured=bool(flags & 2), torque=bool(flags & 4),
                 fw_calibrated=bool(flags & 8), ft_min=struct.unpack_from("<H", b, 28)[0],
                 ft_max=struct.unpack_from("<H", b, 30)[0])
@@ -326,6 +346,8 @@ class BridgeIO(RobotIO):
         self.ids = [calibration.joints[k].id for k in self.k_of]
         self.port_path = port
         self.link_retries = 0
+        self.k_of_id = {calibration.joints[k].id: k for k in self.k_of}
+        self.reset_loss()
         self.bridge = Bridge(port)
         self.served = self.bridge.served_ids()
         unknown = set(self.ids) - set(self.served)
@@ -348,6 +370,53 @@ class BridgeIO(RobotIO):
         self.currents = np.zeros(NUM_JOINTS)
         self.voltages = np.zeros(NUM_JOINTS)
         self.temperatures = np.zeros(NUM_JOINTS)
+        self._poll_status(force=True)
+
+    # -- loss counters (see BUS_LATE_MS) -------------------------------------------------------
+    def reset_loss(self) -> None:
+        self.read_attempts = 0                 # SYNC READs sent (retries included)
+        self.reads_ok = 0
+        self.usb_lost = np.zeros(NUM_JOINTS)   # per joint: its reply lost on USB
+        self.bus_late = np.zeros(NUM_JOINTS)   # per joint: ticks whose feedback was > BUS_LATE_MS old
+        self.fb_age_ms = np.full(NUM_JOINTS, np.nan)
+        self.fb_age_max = np.zeros(NUM_JOINTS)
+        self.tick_usb_missed = np.zeros(NUM_JOINTS)   # this tick's lost replies (for the log)
+        self.loss_since = time.monotonic()
+        self._status0: dict | None = None
+        self.bridge_counts: dict | None = None
+        self._next_status = 0.0
+
+    def _poll_status(self, force: bool = False) -> None:
+        """The firmware's own counters, every STATUS_EVERY_S (one extra ~6 ms read). A lost
+        status reply is not a fault: it is just tried again next time."""
+        now = time.monotonic()
+        if not force and now < self._next_status:
+            return
+        self._next_status = now + STATUS_EVERY_S
+        try:
+            st = self.bridge.status()
+        except BridgeError:
+            return
+        if self._status0 is None or st["uptime_ms"] < self._status0["uptime_ms"]:   # first, or rebooted
+            self._status0 = st
+        z = self._status0
+        span = max(1, st["uptime_ms"] - z["uptime_ms"])
+        self.bridge_counts = {
+            "incomplete_polls": st["incomplete_polls"] - z["incomplete_polls"],
+            "polls": span // 10,               # POLL_MS = 10: polls in that span (approx.)
+            "bad_frames": st["bad_frames"] - z["bad_frames"],
+            "frames": st["frames"] - z["frames"],
+            "seconds": round(span / 1000.0, 1), "cycle_us": st["cycle_us"],
+        }
+
+    def loss(self) -> dict:
+        """Per-joint loss since start / reset_loss(), for the dashboard."""
+        return {"since_s": round(time.monotonic() - self.loss_since, 1),
+                "attempts": self.read_attempts, "reads": self.reads_ok, "retries": self.link_retries,
+                "usb_lost": self.usb_lost.tolist(), "bus_late": self.bus_late.tolist(),
+                "age_ms": [None if not np.isfinite(v) else int(v) for v in self.fb_age_ms],
+                "age_max_ms": self.fb_age_max.tolist(), "bus_late_ms": BUS_LATE_MS,
+                "bridge": self.bridge_counts}
 
     # -- raw encoder <-> virtual units ------------------------------------------------------
     def _dx(self, id_: int, ft: int) -> int:
@@ -380,16 +449,33 @@ class BridgeIO(RobotIO):
         # A lost reply costs ~20 ms (15 ms wait + retry), not a missed tick of 165 ms; two
         # retries before the link counts as lost (two losses in a row: never seen in 13500 reads).
         raw = None
+        self.tick_usb_missed[:] = 0
         for attempt in range(3):
+            self.read_attempts += 1
             try:
                 raw = self.bridge.sync_read(ADDR_DIAG, 32, self.ids)
                 break
-            except BridgeError:
+            except BridgeError as e:
+                for i in getattr(e, "missing", ()):
+                    k = self.k_of_id.get(i)
+                    if k is not None:
+                        self.usb_lost[k] += 1
+                        self.tick_usb_missed[k] += 1
                 if attempt == 2:
                     raise
                 self.link_retries += 1
+        self.reads_ok += 1
         diag = {i: parse_diag(d) for i, d in raw.items()}
         self.diag = diag
+        for i, d in diag.items():
+            k = self.k_of_id[i]
+            age = d["age_ms"] if d["age_ms"] != 0xFFFFFFFF else np.nan
+            self.fb_age_ms[k] = age
+            if age > BUS_LATE_MS:
+                self.bus_late[k] += 1
+            if age > self.fb_age_max[k]:
+                self.fb_age_max[k] = age
+        self._poll_status()
         pos, vel = np.zeros(NUM_JOINTS), np.zeros(NUM_JOINTS)
         for k, j in enumerate(self.cal.joints):
             if not j.id:
