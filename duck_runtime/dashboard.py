@@ -703,12 +703,25 @@ def main(argv=None):
           + (f"{camera.size[0]}x{camera.size[1]}@{camera.fps} ({camera.status()['tuning']})" if camera else "none"))
     print("dashboard:", "  ".join(_urls(args.http_port, token)))
     print("Ctrl+C here: torque off and exit")
+    import signal
+
+    def _term(signum, frame):              # systemd / kill: the same orderly exit as Ctrl+C
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _term)
     try:
         dash.run()
     except KeyboardInterrupt:
         pass
     finally:
+        # The shutdown must run to the end: a second Ctrl+C / SIGTERM (uv run forwards one more)
+        # would otherwise cut it short. Torque off first.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         dash.shutdown()
+        try:
+            runner.limp()
+        except Exception as e:                # a lost link: the bridge drops torque by itself in 1 s
+            print(f"limp on exit: {e}")
         if camera is not None:
             camera.close()                    # finishes a recording in progress
         if dash.recording:
@@ -716,7 +729,6 @@ def main(argv=None):
             name = time.strftime("dash_%Y%m%d-%H%M%S.npz")
             save_log(str(dash.log_dir / name), dash.recording, dash.log_meta())
             print(f"\nrecording -> {dash.log_dir / name}")
-        runner.limp()
         io.close()
         server.shutdown()
 
