@@ -4,7 +4,8 @@ The env is the TRAINING env of the task (same actuator model, DR, delays, backla
   - curricula removed (eval conditions are fixed by the arguments, not by a step counter),
   - command resampling disabled (the scripts write the command every step),
   - the one-foot spawn probability and the push magnitude set explicitly.
-Which servo / mass model that is depends on the branch: `flamingo` = official XL330 build.
+Which servo / mass model that is depends on the branch: `flamingo` = official XL330 build (737 g),
+`flamingo-hd1910` = HD1910 servos + mass profile ours_835g (MICRODUCK_SERVO / MICRODUCK_MASS_PROFILE).
 """
 
 from __future__ import annotations
